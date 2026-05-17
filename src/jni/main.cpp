@@ -666,10 +666,10 @@ void _LogToBlackBox(const std::string& msg) {
     pthread_mutex_unlock(&g_blackBoxMutex);
 }
 
-    void _LogToJava(const std::string& msg) {
+void _LogToJava(const std::string& msg) {
     bool keep = false;
-        
-    bool isRender = msg.find("[RENDER]") != std::string::npos || msg.find("[GL-TRACE]") != std::string::npos || msg.find("[SHADER-DUMP]") != std::string::npos || msg.find("EGL") != std::string::npos || msg.find("[SIZE-CRITICAL]") != std::string::npos || msg.find("[SIZE-TRACE]") != std::string::npos || msg.find("[GL-TEX]") != std::string::npos || msg.find("[GL-UNIFORM]") != std::string::npos || msg.find("[DRAW-DEBUG]") != std::string::npos;
+    
+    bool isRender = msg.find("[RENDER]") != std::string::npos || msg.find("[GL-TRACE]") != std::string::npos || msg.find("[SHADER-DUMP]") != std::string::npos || msg.find("EGL") != std::string::npos;
     bool isSound = msg.find("HLE_AUDIO") != std::string::npos || msg.find("AL-") != std::string::npos || msg.find("OpenAL") != std::string::npos || msg.find("Audio") != std::string::npos;
     bool isFs = msg.find("C-API-IO") != std::string::npos || msg.find("FOPEN") != std::string::npos || msg.find("fopen") != std::string::npos || msg.find("stat") != std::string::npos;
     bool isNet = msg.find("Reachability") != std::string::npos || msg.find("socket") != std::string::npos || msg.find("bind") != std::string::npos || msg.find("connect") != std::string::npos || msg.find("gethostbyname") != std::string::npos;
@@ -689,7 +689,7 @@ void _LogToBlackBox(const std::string& msg) {
     else if (isHiddenClass && g_logHiddenClasses) keep = true;
     else if (g_logOther) keep = true;
     
-    if (msg.find("FATAL") != std::string::npos || (msg.find("CRITICAL") != std::string::npos && msg.find("[SIZE-CRITICAL]") == std::string::npos) || msg.find("ERROR") != std::string::npos || msg.find("ОШИБКА") != std::string::npos || msg.find("ASSERT") != std::string::npos) {
+    if (msg.find("FATAL") != std::string::npos || msg.find("CRITICAL") != std::string::npos || msg.find("ERROR") != std::string::npos || msg.find("ОШИБКА") != std::string::npos || msg.find("ASSERT") != std::string::npos) {
         keep = true; // Always log fatals/errors if logging is enabled at all
     }
     
