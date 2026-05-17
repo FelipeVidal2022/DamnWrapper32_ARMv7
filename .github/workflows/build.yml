@@ -25,6 +25,11 @@ jobs:
     - name: Raw Console Build (No Gradle)
       run: |
         set -e
+        
+        echo "=== 0. Install legacy system libraries for NDK r17c ==="
+        sudo apt-get update
+        sudo apt-get install -y libncurses5
+        
         echo "=== 1. Setup Build Environment ==="
         export SDK=$ANDROID_SDK_ROOT
         export BUILD_TOOLS=$(ls -d $SDK/build-tools/* | sort -V | tail -1)
@@ -37,7 +42,6 @@ jobs:
         fi
         
         echo "=== 1.5. Download and Setup NDK r17c ==="
-        # Качаем ту самую версию NDK r17c из архивов Google
         wget -q https://dl.google.com/android/repository/android-ndk-r17c-linux-x86_64.zip
         unzip -q android-ndk-r17c-linux-x86_64.zip
         export NDK=$PWD/android-ndk-r17c
