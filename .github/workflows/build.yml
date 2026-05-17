@@ -28,11 +28,7 @@ jobs:
         
         echo "=== 0. Install legacy system libraries for NDK r17c ==="
         sudo apt-get update
-        # Пытаемся поставить пакет легально (в 22.04 он еще бывает в universe)
         sudo apt-get install -y libncurses5 libtinfo5 || true
-        
-        # Хак: Если старых библиотек нет, привязываем современные libtinfo6/libncurses6 к именам 5-й версии.
-        # Для старого Android NDK это работает безотказно.
         sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 || true
         sudo ln -sf /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 || true
         
@@ -77,15 +73,16 @@ jobs:
         find src/java -name "*.java" > build/java_sources.txt
         find build/gen -name "*.java" >> build/java_sources.txt
         
-        javac -source 1.8 -target 1.8 \
-          -bootclasspath $PLATFORM/android.jar \
-          -cp build/gen \
+        # Убрали -bootclasspath, перенесли android.jar в -cp
+        javac -source 8 -target 8 \
+          -cp "$PLATFORM/android.jar:build/gen" \
           -d build/obj \
           @build/java_sources.txt
 
         echo "=== 5. Dexing (D8) ==="
         cd build/obj
-        $BUILD_TOOLS/d8 --release --lib $PLATFORM/android.jar --output ../apk/ $(find . -name "*.class")
+        # Добавили --min-api 21 для корректного дешугаринга лямбд
+        $BUILD_TOOLS/d8 --release --min-api 21 --lib $PLATFORM/android.jar --output ../apk/ $(find . -name "*.class")
         cd ../..
 
         echo "=== 6. Package Final APK ==="
