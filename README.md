@@ -15,3 +15,6 @@ Compatability: Fully working but saves not works (Tested only on 2.0.0, other ve
 Perfomance: ~12 FPS on Snapdragon 7 Gen 2+
 
 *Theoretically support is IOS 3.0-4.3, if you will find some games except in list upper that works then dm me :)
+
+--- Compiling:
+NDK r17 (build 4754217), that released in middle of 2018 year (android-ndk-aide).
