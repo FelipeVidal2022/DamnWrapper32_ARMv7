@@ -2213,7 +2213,7 @@ extern "C" void Stub_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, 
     // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
     const GLvoid* safe_pixels = pixels;
     std::vector<uint8_t> aligned_buf;
-    if (pixels != nullptr && ((uintptr_t)pixels % 8 != 0)) {
+    if (pixels != nullptr && ((uintptr_t)pixels % 16 != 0)) {
         size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
         if (totalBytes > 0) {
             aligned_buf.resize(totalBytes);
