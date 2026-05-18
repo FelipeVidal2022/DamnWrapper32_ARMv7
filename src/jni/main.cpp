@@ -8605,7 +8605,7 @@ extern "C" size_t wrap_CGImageGetBitsPerPixel(void* image) { return image ? ((HL
 extern "C" void* wrap_CGImageGetColorSpace(void* image) { return wrap_CGColorSpaceCreateDeviceRGB(); }
 extern "C" void* wrap_CGImageGetDataProvider(void* image) { return image; } // Dummy
 
-extern "C" char* (char* dest, const char* src) {
+extern "C" char* wrap_strcat(char* dest, const char* src) {
     char* res = strcat(dest, src);
     if (res && (strstr(res, "pngConf") || strstr(res, "jungle"))) {
         LogToJava(std::string("C-API-DEBUG: [strcat] Собрана строка: [") + res + "] src: [" + src + "]");
