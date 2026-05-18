@@ -2068,18 +2068,53 @@ extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalform
     }
 
     // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
+
+    // 1. Нормализуем format/internalformat для совместимости с GLES2.
+    //    MTK-драйвер падает если internalformat = GL_BGRA_EXT (0x80E1) или другой нестандартный.
+    //    Конвертируем BGRA пиксели в RGBA и меняем format/internalformat на GL_RGBA.
+    GLenum hw_format = format;
+    GLenum hw_internalformat = internalformat;
+    std::vector<uint8_t> converted_buf;
     const GLvoid* safe_pixels = pixels;
-    std::vector<uint8_t> aligned_buf;
-    if (pixels != nullptr && ((uintptr_t)pixels % 8 != 0)) {
-        size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
-        if (totalBytes > 0) {
-            aligned_buf.resize(totalBytes);
-            memcpy(aligned_buf.data(), pixels, totalBytes);
-            safe_pixels = aligned_buf.data();
+
+    if (format == 0x80E1 && type == GL_UNSIGNED_BYTE) {
+        // GL_BGRA_EXT -> GL_RGBA: свапаем R и B каналы
+        hw_format = GL_RGBA;
+        hw_internalformat = GL_RGBA;
+        if (pixels) {
+            size_t totalBytes = (size_t)width * height * 4;
+            converted_buf.resize(totalBytes);
+            const uint8_t* src = (const uint8_t*)pixels;
+            uint8_t* dst = converted_buf.data();
+            for (size_t i = 0; i < (size_t)width * height; i++) {
+                dst[i*4+0] = src[i*4+2]; // R <- B
+                dst[i*4+1] = src[i*4+1]; // G
+                dst[i*4+2] = src[i*4+0]; // B <- R
+                dst[i*4+3] = src[i*4+3]; // A
+            }
+            safe_pixels = converted_buf.data();
+        }
+    } else {
+        // Нормализуем internalformat под стандарт GLES2 (на случай нестандартных значений от iOS)
+        if (hw_internalformat == 0x80E1) hw_internalformat = GL_RGBA;
+        else if (hw_internalformat != GL_RGBA && hw_internalformat != GL_RGB &&
+                 hw_internalformat != GL_ALPHA && hw_internalformat != GL_LUMINANCE &&
+                 hw_internalformat != GL_LUMINANCE_ALPHA) {
+            hw_internalformat = hw_format; // Fallback: используем format
+        }
+
+        // 2. Всегда копируем буфер — MTK требует выровненную память во всех случаях
+        if (pixels != nullptr) {
+            size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
+            if (totalBytes > 0) {
+                converted_buf.resize(totalBytes);
+                memcpy(converted_buf.data(), pixels, totalBytes);
+                safe_pixels = converted_buf.data();
+            }
         }
     }
-    
-    glTexImage2D(target, level, internalformat, width, height, border, format, type, safe_pixels);
+
+    glTexImage2D(target, level, hw_internalformat, width, height, border, hw_format, type, safe_pixels);
 }
 
 extern "C" void Stub_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -3506,42 +3541,22 @@ void RenderHLEUI() {
 // ==========================================
 // HLE OBJECTIVE-C RUNTIME
 // ==========================================
-extern uint32_t g_min_vmaddr;
-extern uint32_t g_max_vmaddr;
-
-// Динамически исправляет "забытые" ребазером указатели на лету
-inline uint32_t FixObjCPtr(uint32_t ptr) {
-    if (g_appSlide > 0 && ptr >= g_min_vmaddr && ptr < g_max_vmaddr) {
-        return ptr + g_appSlide;
-    }
-    return ptr;
-}
-
 std::string GetObjCClassName(void* obj) {
     if (!obj || (uintptr_t)obj < 0x1000) return "nil";
     uint32_t isa = 0;
-    
     if (!SafeRead32((uintptr_t)obj, &isa)) return "InvalidObj";
-    isa = FixObjCPtr(isa);
-    
     if (isa == 0xDEADBEEF) return ((HLEClass*)obj)->className;
-    
     if (isa > 0x1000) {
         uint32_t cls0 = 0;
         if (!SafeRead32(isa, &cls0)) return "InvalidIsa";
         if (cls0 == 0xDEADBEEF) return std::string(((HLEClass*)isa)->className) + "(instance)";
-        
         uint32_t cls4 = 0;
         if (SafeRead32(isa + 16, &cls4)) {
-            uint32_t data_ptr = FixObjCPtr(cls4 & ~3);
+            uint32_t data_ptr = cls4 & ~3;
             if (data_ptr > 0x1000) {
                 uint32_t name_ptr = 0;
                 if (SafeRead32(data_ptr + 16, &name_ptr) && name_ptr > 0x1000) {
-                    name_ptr = FixObjCPtr(name_ptr);
-                    char name_buf[128] = {0};
-                    if (SafeReadString(name_ptr, name_buf, 127)) {
-                        if (name_buf[0] != '\0') return std::string(name_buf);
-                    }
+                    if (isValidString((const char*)name_ptr)) return std::string((const char*)name_ptr);
                 }
             }
         }
@@ -3550,57 +3565,23 @@ std::string GetObjCClassName(void* obj) {
 }
 
 void* FindMethodIMP(uint32_t class_ptr, const char* selName) {
-    class_ptr = FixObjCPtr(class_ptr);
     if (!class_ptr || class_ptr < 0x1000) return nullptr;
-    
-    uint32_t cls0 = 0;
-    if (!SafeRead32(class_ptr, &cls0)) return nullptr;
-    if (cls0 == 0xDEADBEEF) return nullptr;
-    
-    uint32_t cls4 = 0;
-    if (!SafeRead32(class_ptr + 16, &cls4)) return nullptr;
-    
-    uint32_t data_ptr = FixObjCPtr(cls4 & ~3);
-    if (!data_ptr || data_ptr < 0x1000) return nullptr;
-    
-    uint32_t ro5 = 0;
-    if (!SafeRead32(data_ptr + 20, &ro5)) return nullptr;
-    
-    uint32_t methodList_ptr = FixObjCPtr(ro5);
+    uint32_t* cls = (uint32_t*)class_ptr; 
+    // Если мы дошли до HLE-класса (заглушки), значит в нативном коде реализации нет
+    if (cls[0] == 0xDEADBEEF) return nullptr;
+    uint32_t data_ptr = cls[4] & ~3; if (!data_ptr || data_ptr < 0x1000) return nullptr;
+    uint32_t* ro = (uint32_t*)data_ptr; uint32_t methodList_ptr = ro[5]; 
     if (methodList_ptr && methodList_ptr > 0x1000) {
-        uint32_t mlist1 = 0;
-        if (SafeRead32(methodList_ptr + 4, &mlist1)) {
-            uint32_t count = mlist1;
-            if (count < 10000) {
-                uint32_t methods_base = methodList_ptr + 8;
-                for (uint32_t i = 0; i < count; i++) {
-                    uint32_t m_name_ptr = 0, m_imp = 0;
-                    if (SafeRead32(methods_base + i * 12 + 0, &m_name_ptr) &&
-                        SafeRead32(methods_base + i * 12 + 8, &m_imp)) {
-                        
-                        m_name_ptr = FixObjCPtr(m_name_ptr);
-                        m_imp = FixObjCPtr(m_imp);
-                        
-                        char name_buf[128] = {0};
-                        if (SafeReadString(m_name_ptr, name_buf, 127)) {
-                            if (name_buf[0] != '\0' && strcmp(name_buf, selName) == 0) {
-                                return (void*)m_imp;
-                            }
-                        }
-                    }
-                }
+        uint32_t* mlist = (uint32_t*)methodList_ptr; uint32_t count = mlist[1];
+        if (count < 10000) { 
+            uint32_t* methods = mlist + 2; 
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t m_name_ptr = methods[i*3 + 0]; uint32_t m_imp = methods[i*3 + 2];
+                if (isValidString((const char*)m_name_ptr)) { if (strcmp((const char*)m_name_ptr, selName) == 0) return (void*)m_imp; }
             }
         }
     }
-    
-    uint32_t super_class = 0;
-    if (SafeRead32(class_ptr + 4, &super_class)) {
-        super_class = FixObjCPtr(super_class);
-        if (super_class && super_class != class_ptr) {
-            return FindMethodIMP(super_class, selName);
-        }
-    }
-    
+    uint32_t super_class = cls[1]; if (super_class && super_class != class_ptr) return FindMethodIMP(super_class, selName);
     return nullptr;
 }
 
@@ -3608,29 +3589,23 @@ void* GetNSValuePtr(void* nsvalue) { return (void*)((uint32_t*)nsvalue)[1]; }
 
 // --- HELPER: Поиск ближайшего системного класса (HLE) в дереве наследования ---
 std::string GetBaseSystemClassName(uint32_t class_ptr) {
-    class_ptr = FixObjCPtr(class_ptr);
     if (!class_ptr || class_ptr < 0x1000) return "Unknown";
     
-    int depth = 0; 
+    int depth = 0; // Защита от бесконечного цикла, если дерево сломано
     uint32_t current = class_ptr;
     
     while (current > 0x1000 && depth++ < 20) {
-        uint32_t cls0 = 0;
-        if (!SafeRead32(current, &cls0)) break;
-        if (cls0 == 0xDEADBEEF) {
+        uint32_t* cls = (uint32_t*)current;
+        // Если наткнулись на HLE-класс (наш системный маркер)
+        if (cls[0] == 0xDEADBEEF) {
             return ((HLEClass*)current)->className;
         }
-        
-        uint32_t super_class = 0;
-        if (SafeRead32(current + 4, &super_class)) {
-            super_class = FixObjCPtr(super_class);
-            if (!super_class || super_class == current) break;
-            current = super_class;
-        } else {
-            break;
-        }
+        // Шагаем к родителю
+        uint32_t super_class = cls[1];
+        if (!super_class || super_class == current) break;
+        current = super_class;
     }
-    return "NSObject"; 
+    return "NSObject"; // Фолбек, если дошли до конца и ничего не поняли
 }
 // ------------------------------------------------------------------------------
 
@@ -10683,7 +10658,7 @@ void LoadMachO(const std::string& bundlePath) {
     lseek(fd, arch_offset, SEEK_SET); mach_header mh; read(fd, &mh, sizeof(mh));
 
     // --- ПЕРВЫЙ ПРОХОД: Вычисляем min/max vmaddr и slide ---
-    g_min_vmaddr = 0xFFFFFFFF; g_max_vmaddr = 0;
+    uint32_t min_vmaddr = 0xFFFFFFFF; uint32_t max_vmaddr = 0;
     uint32_t scan_offset = arch_offset + sizeof(mach_header);
     for (uint32_t i = 0; i < mh.ncmds; i++) {
         load_command lc; lseek(fd, scan_offset, SEEK_SET); read(fd, &lc, sizeof(lc));
