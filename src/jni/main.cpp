@@ -10296,7 +10296,6 @@ void* CreateDynamicStub(const std::string& name) {
 }
 
 // --- ТРАМПЛИН ДЛЯ ВЫРАВНИВАНИЯ СТЕКА (АДАПТАЦИЯ IOS ABI -> ANDROID AAPCS) ---
-// --- ТРАМПЛИН ДЛЯ ВЫРАВНИВАНИЯ СТЕКА (АДАПТАЦИЯ IOS ABI -> ANDROID AAPCS) ---
 // Спасает драйвера MTK/Mali от SIGBUS/SIGSEGV при вызове тяжелых OpenGL функций
 void* CreateAlignedTrampoline(void* real_func) {
     static uint8_t* exec_mem = nullptr;
@@ -10328,7 +10327,7 @@ void* CreateAlignedTrampoline(void* real_func) {
     stub[13]= 0xE8BD4010; // pop {r4, lr}           ; Восстанавливаем контекст
     stub[14]= 0xE28DD010; // add sp, sp, #16        ; Снимаем r0-r3 со стека
     stub[15]= 0xE12FFF1E; // bx lr                  ; Возврат в игру
-    stub[16]= (uint32_t)real_func;                  ; Указатель на C++ обертку (цель)
+    stub[16]= (uint32_t)real_func;                  // Указатель на C++ обертку (цель)
     
     __builtin___clear_cache((char*)stub, (char*)(stub + 17));
     offset += 68;
