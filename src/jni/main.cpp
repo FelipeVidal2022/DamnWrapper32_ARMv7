@@ -10296,6 +10296,7 @@ void* CreateDynamicStub(const std::string& name) {
 }
 
 // --- ТРАМПЛИН ДЛЯ ВЫРАВНИВАНИЯ СТЕКА (АДАПТАЦИЯ IOS ABI -> ANDROID AAPCS) ---
+// --- ТРАМПЛИН ДЛЯ ВЫРАВНИВАНИЯ СТЕКА (АДАПТАЦИЯ IOS ABI -> ANDROID AAPCS) ---
 // Спасает драйвера MTK/Mali от SIGBUS/SIGSEGV при вызове тяжелых OpenGL функций
 void* CreateAlignedTrampoline(void* real_func) {
     static uint8_t* exec_mem = nullptr;
@@ -10317,13 +10318,17 @@ void* CreateAlignedTrampoline(void* real_func) {
     stub[7] = 0xE88D4FE0; // stmia sp, {r5-r11, lr} ; Копируем их на наш выровненный стек
     stub[8] = 0xE284C008; // add ip, r4, #8         ; ip указывает на сохраненные r0-r3
     stub[9] = 0xE89C000F; // ldmia ip, {r0-r3}      ; Восстанавливаем первые 4 аргумента
-    stub[10]= 0xE59FC008; // ldr ip, [pc, #8]       ; Загружаем указатель на C++ обертку
+    
+    // ИСПРАВЛЕНИЕ: Смещение #16 (0x010), так как PC опережает выполнение на 8 байт.
+    // 40 (текущий оффсет) + 8 (PC) + 16 = 64 (оффсет stub[16], где лежит real_func)
+    stub[10]= 0xE59FC010; // ldr ip, [pc, #16]      ; Загружаем указатель на C++ обертку
+    
     stub[11]= 0xE12FFF3C; // blx ip                 ; Прыжок в C++ с идеальным 8-байтным стеком!
     stub[12]= 0xE1A0D004; // mov sp, r4             ; Возвращаем старый кривой SP для iOS
     stub[13]= 0xE8BD4010; // pop {r4, lr}           ; Восстанавливаем контекст
     stub[14]= 0xE28DD010; // add sp, sp, #16        ; Снимаем r0-r3 со стека
     stub[15]= 0xE12FFF1E; // bx lr                  ; Возврат в игру
-    stub[16]= (uint32_t)real_func;
+    stub[16]= (uint32_t)real_func;                  ; Указатель на C++ обертку (цель)
     
     __builtin___clear_cache((char*)stub, (char*)(stub + 17));
     offset += 68;
