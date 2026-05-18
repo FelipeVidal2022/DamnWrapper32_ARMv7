@@ -1941,11 +1941,10 @@ static inline size_t SafeGetGLTextureSize(GLsizei width, GLsizei height, GLenum 
     else if (format == 0x190A && type == GL_UNSIGNED_BYTE) bpp = 2; // GL_LUMINANCE_ALPHA
     else if (format == 0x80E1 && type == GL_UNSIGNED_BYTE) bpp = 4; // GL_BGRA_EXT
 
-    GLint align = 4;
-    glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
-    int rowLength = width * bpp;
-    int stride = rowLength + ((align - (rowLength % align)) % align);
-    return stride * height;
+    // НАМЕРЕННО не вызываем glGetIntegerv(GL_UNPACK_ALIGNMENT) — это может вызвать
+    // краш в MTK-драйвере при вызове из промежуточного состояния GL-контекста.
+    // Используем alignment=1: чуть консервативнее по памяти, но полностью безопасно.
+    return (size_t)width * (size_t)height * bpp;
 }
 
 extern "C" void Stub_glBindTexture(GLenum target, GLuint texture) {
@@ -1954,7 +1953,11 @@ extern "C" void Stub_glBindTexture(GLenum target, GLuint texture) {
 }
 
 extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
-    LogToJava("[GL-TEX] glTexImage2D: tex=" + std::to_string(g_cpuActiveTexture) + " w=" + std::to_string(width) + " h=" + std::to_string(height) + " intFmt=0x" + std::to_string(internalformat) + " fmt=0x" + std::to_string(format) + " type=0x" + std::to_string(type) + " pixels=" + std::to_string(pixels != nullptr));
+    // Лог с hex-значениями для диагностики
+    char logbuf[256];
+    snprintf(logbuf, sizeof(logbuf), "[GL-TEX] glTexImage2D: tex=%u w=%d h=%d intFmt=0x%X fmt=0x%X type=0x%X pixels=%d",
+        g_cpuActiveTexture, width, height, (unsigned)internalformat, (unsigned)format, (unsigned)type, pixels != nullptr);
+    LogToJava(logbuf);
     if (target == GL_TEXTURE_2D && level == 0) {
         g_cpuTexW[g_cpuActiveTexture] = width;
         g_cpuTexH[g_cpuActiveTexture] = height;
@@ -1964,8 +1967,9 @@ extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalform
         if (!pixels) {
             std::fill(texBuf.begin(), texBuf.end(), 0xFF000000);
         } else {
+            // Намеренно не вызываем glGetIntegerv(GL_UNPACK_ALIGNMENT) — может крашить MTK.
+            // Используем alignment=4 (дефолт OpenGL ES; Wolf3D не меняет glPixelStorei).
             GLint align = 4;
-            glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
 
             if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
                 int rowLength = width * 4;
@@ -2069,11 +2073,24 @@ extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalform
 
     // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
 
-    // 1. Нормализуем format/internalformat для совместимости с GLES2.
-    //    MTK-драйвер падает если internalformat = GL_BGRA_EXT (0x80E1) или другой нестандартный.
-    //    Конвертируем BGRA пиксели в RGBA и меняем format/internalformat на GL_RGBA.
     GLenum hw_format = format;
-    GLenum hw_internalformat = internalformat;
+    GLenum hw_internalformat = (GLenum)internalformat;
+
+    // Нормализуем GLES1-стиль internalformat (числа 1–4) в реальные enum-ы GLES2.
+    // iOS/GLES1.1 позволял передавать кол-во компонент (1=LUMINANCE, 2=LUMINANCE_ALPHA,
+    // 3=RGB, 4=RGBA). MTK-драйвер на GLES2 это не понимает и крашит.
+    if (hw_internalformat == 1) hw_internalformat = GL_LUMINANCE;
+    else if (hw_internalformat == 2) hw_internalformat = GL_LUMINANCE_ALPHA;
+    else if (hw_internalformat == 3) hw_internalformat = GL_RGB;
+    else if (hw_internalformat == 4) hw_internalformat = GL_RGBA;
+    // Нормализуем нестандартные значения (BGRA_EXT как internalformat, и пр.)
+    else if (hw_internalformat == 0x80E1) hw_internalformat = GL_RGBA; // GL_BGRA_EXT
+    else if (hw_internalformat != GL_RGBA && hw_internalformat != GL_RGB &&
+             hw_internalformat != GL_ALPHA && hw_internalformat != GL_LUMINANCE &&
+             hw_internalformat != GL_LUMINANCE_ALPHA) {
+        hw_internalformat = hw_format; // Fallback: берём format
+    }
+
     std::vector<uint8_t> converted_buf;
     const GLvoid* safe_pixels = pixels;
 
@@ -2094,23 +2111,13 @@ extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalform
             }
             safe_pixels = converted_buf.data();
         }
-    } else {
-        // Нормализуем internalformat под стандарт GLES2 (на случай нестандартных значений от iOS)
-        if (hw_internalformat == 0x80E1) hw_internalformat = GL_RGBA;
-        else if (hw_internalformat != GL_RGBA && hw_internalformat != GL_RGB &&
-                 hw_internalformat != GL_ALPHA && hw_internalformat != GL_LUMINANCE &&
-                 hw_internalformat != GL_LUMINANCE_ALPHA) {
-            hw_internalformat = hw_format; // Fallback: используем format
-        }
-
-        // 2. Всегда копируем буфер — MTK требует выровненную память во всех случаях
-        if (pixels != nullptr) {
-            size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
-            if (totalBytes > 0) {
-                converted_buf.resize(totalBytes);
-                memcpy(converted_buf.data(), pixels, totalBytes);
-                safe_pixels = converted_buf.data();
-            }
+    } else if (pixels != nullptr) {
+        // Всегда копируем в свой буфер — MTK требует выровненную память
+        size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
+        if (totalBytes > 0) {
+            converted_buf.resize(totalBytes);
+            memcpy(converted_buf.data(), pixels, totalBytes);
+            safe_pixels = converted_buf.data();
         }
     }
 
@@ -2124,8 +2131,9 @@ extern "C" void Stub_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, 
         int texH = g_cpuTexH[g_cpuActiveTexture];
         
         if (xoffset >= 0 && yoffset >= 0 && xoffset + width <= texW && yoffset + height <= texH) {
+            // Не вызываем glGetIntegerv(GL_UNPACK_ALIGNMENT) — может крашить MTK.
+            // Используем дефолтный alignment=4.
             GLint align = 4;
-            glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
 
             if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
                 int rowLength = width * 4;
