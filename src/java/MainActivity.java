@@ -446,7 +446,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
             android.widget.CheckBox cb = new android.widget.CheckBox(this);
             cb.setText(gpuNames[i]);
             cb.setTextColor(Color.WHITE);
-            cb.setChecked(getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + i, false));
+            cb.setChecked(getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + i, true));
             final int bitIdx = i;
             cb.setOnCheckedChangeListener((btnView, isChecked) -> {
                 getSharedPreferences("DamnPrefs", MODE_PRIVATE).edit().putBoolean("gpu_bit_" + bitIdx, isChecked).apply();
@@ -909,7 +909,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
                                 for (int j = 0; j < 9; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean(sfKeys[j], true)) tempSpamMask |= (1 << j);
                                 final int finalSpamMask = tempSpamMask;
                                 int gpuMask = 0;
-                                for (int j = 0; j < 7; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + j, false)) gpuMask |= (1 << j);
+                                for (int j = 0; j < 7; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + j, true)) gpuMask |= (1 << j);
                                 startGameThread(WORK_DIR, finalAppDir.getAbsolutePath(), bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, finalSpamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode, gpuMask);
                             });
                             return;
@@ -1316,7 +1316,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
                 for (int j = 0; j < 9; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean(sfKeys[j], true)) tempSpamMask |= (1 << j);
                 final int finalSpamMask = tempSpamMask;
                 int gpuMask = 0;
-                for (int j = 0; j < 7; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + j, false)) gpuMask |= (1 << j);
+                for (int j = 0; j < 7; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + j, true)) gpuMask |= (1 << j);
                 startGameThread(WORK_DIR, app.appDirPath, app.bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, finalSpamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode, gpuMask);
             });
             return layout;
