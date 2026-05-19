@@ -1780,6 +1780,32 @@ extern "C" EGLBoolean MegaDebug_eglSwapBuffers(EGLDisplay dpy, EGLSurface surfac
     return res;
 }
 
+// --- НОВЫЕ ФУНКЦИИ (ЧЕСТНАЯ РЕАЛИЗАЦИЯ БЕЗ ЗАГЛУШЕК) ---
+extern "C" char* wrap___strncpy_chk(char* dest, const char* src, size_t n, size_t destlen) {
+    if (src && (strstr(src, "pngConf") || strstr(src, "jungle"))) {
+        LogToJava(std::string("C-API-DEBUG: [__strncpy_chk] Копируется строка: [") + src + "]");
+    }
+    return strncpy(dest, src, n);
+}
+
+extern "C" int wrap___vsnprintf_chk(char *str, size_t maxlen, int flag, size_t bos, const char *format, va_list args) { 
+    int ret = vsnprintf(str, maxlen, format, args); 
+    if (str && (strstr(str, "pngConf") || strstr(str, "jungle"))) {
+        LogToJava(std::string("C-API-DEBUG: [__vsnprintf_chk] Собрана строка: [") + str + "]");
+    }
+    return ret; 
+}
+
+extern "C" int wrap_putc(int c, void* fp) { return fputc(c, unwrap_file(fp)); }
+extern "C" double wrap_rint(double x) { return rint(x); }
+extern "C" char* wrap_dlerror() { return (char*)""; }
+
+extern "C" void* wrap_CGDataProviderCopyData(void* provider) { return nullptr; }
+extern "C" size_t wrap_CGImageGetBitsPerPixel(void* image) { return image ? (((HLE_CGImage*)image)->bpp * 4) : 32; }
+extern "C" void* wrap_CGImageGetColorSpace(void* image) { return wrap_CGColorSpaceCreateDeviceRGB(); }
+extern "C" void* wrap_CGImageGetDataProvider(void* image) { return image; }
+// --------------------------------------------------------
+
 // OPENGL FBO REDIRECTORS
 // ==========================================
 extern "C" void Stub_glBindFramebuffer(GLenum target, GLuint framebuffer) { 
@@ -10403,7 +10429,10 @@ std::map<std::string, void*> g_hleStubs = {
     {"___stderrp", (void*)&hle_stderrp_ptr}, {"___stdoutp", (void*)&hle_stdoutp_ptr},
 
     STB_W(AudioComponentInstanceDispose), STB_W(AudioConverterDispose), STB_W(AudioConverterFillComplexBuffer), STB_W(AudioConverterNew), STB_W(AudioFileClose), STB_W(AudioFileGetProperty), STB_W(AudioFileGetPropertyInfo), STB_W(AudioFileOpenURL), STB_W(AudioFileOpenWithCallbacks), STB_W(AudioFileReadPackets), STB_W(AudioFileReadBytes), STB_W(AudioQueueAllocateBuffer), STB_W(AudioQueueAllocateBufferWithPacketDescriptions), STB_W(AudioQueueDispose), STB_W(AudioQueueEnqueueBuffer), STB_W(AudioQueueEnqueueBufferWithParameters), STB_W(AudioQueueFreeBuffer), STB_W(AudioQueueGetProperty), STB_W(AudioQueueGetCurrentTime), STB_W(AudioQueuePrime), STB_W(AudioQueueSetParameter), STB_W(AudioQueueNewOutput), STB_W(AudioQueuePause), STB_W(AudioQueueStart), STB_W(AudioQueueStop), STB_W(AudioSessionInitialize), STB_W(AudioSessionSetActive), STB_W(AudioSessionAddPropertyListener), STB_W(AudioSessionGetProperty), STB_W(AudioSessionSetProperty), STB_W(AudioUnitInitialize), STB_W(AudioUnitUninitialize), STB_W(AudioUnitGetParameter), STB_W(AudioUnitGetProperty), STB_W(AudioUnitSetProperty), STB_W(AudioOutputUnitStart), STB_W(AudioOutputUnitStop),
-    
+
+    STB_W(__strncpy_chk), STB_W(__vsnprintf_chk), STB_W(putc), STB_W(rint), STB_W(dlerror), {"__exit", (void*)Stub_exit},
+    STB_W(CGDataProviderCopyData), STB_W(CGImageGetBitsPerPixel), STB_W(CGImageGetColorSpace), STB_W(CGImageGetDataProvider)
+
     {"__ZNKSs12find_last_ofEPKcm", (void*)wrap_cxx_string_find_last_of_ptr_len},
     {"__ZNKSs4findERKSsm", (void*)wrap_cxx_string_find_string},
     {"__ZNKSsixEm", (void*)wrap_cxx_string_operator_index},
