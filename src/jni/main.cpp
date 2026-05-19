@@ -4933,7 +4933,7 @@ uint64_t Impl_objc_msgSend(void* self, const char* op, void* a1, void* a2, void*
             }
         }
         if (clsName == "UIDevice") {
-            if (strcmp(op, "systemVersion") == 0) return (uint64_t)(uintptr_t)CreateNSString("5.0");
+            if (strcmp(op, "systemVersion") == 0) return (uint64_t)(uintptr_t)CreateNSString("6.1");
             if (strcmp(op, "model") == 0) return (uint64_t)(uintptr_t)CreateNSString("iPhone");
             if (strcmp(op, "name") == 0) return (uint64_t)(uintptr_t)CreateNSString("DamnDevice");
             if (strcmp(op, "UTF8String") == 0) return (uint64_t)(uintptr_t)"DamnDevice";
