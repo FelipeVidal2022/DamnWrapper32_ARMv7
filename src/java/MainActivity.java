@@ -1,4 +1,4 @@
-package com.damnwrapper32armv7.xaview;
+package com.damnwrapper32armv7.felipevidal2022;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
@@ -147,7 +147,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
     private HashMap<Integer, Integer> alSourceToBuffer = new HashMap<>();
     private HashMap<Integer, AudioTrack> alSourceTracks = new HashMap<>();
 
-    private static final String WORK_DIR = Environment.getExternalStorageDirectory() + "/DamnWrapper32_ARMv7/";
+    private static final String WORK_DIR = Environment.getExternalStorageDirectory() + "/DamnWrapper32_FV2022/";
     private static final String APPS_DIR = WORK_DIR + "apps/";
     private static final String APPS_INSTALLED_DIR = WORK_DIR + "apps_installed/";
     private static final String SETUP_DIR = WORK_DIR + "setup/";
@@ -245,7 +245,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         launcherGrid.setVisibility(View.GONE);
 
         noGamesText = new TextView(this);
-        noGamesText.setText("Games not finded, put it in DamnWrapper32_ARMv7/apps");
+        noGamesText.setText("Games not finded, put it in DamnWrapper32_FV2022/apps");
         noGamesText.setTextColor(Color.LTGRAY);
         noGamesText.setTextSize(18f);
         noGamesText.setGravity(Gravity.CENTER);
@@ -283,7 +283,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         aboutText.setTextColor(Color.WHITE);
         aboutText.setGravity(Gravity.CENTER);
         aboutText.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
-        String aboutHtml = "DamnWrapper32 (ARMv7) - IOS wrapper by XaView<br><br>" +
+        String aboutHtml = "DamnWrapper32 (ARMv7) - IOS wrapper<br>" +
                 "Current IOS support:<br>" +
                 "ARMv7 Only<br>" +
                 "OpenGL ES 2.0 Only<br>" +
@@ -772,7 +772,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
             rootLayout.addView(wallpaperView, 0, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         } else {
             TextView wallpaperHintText = new TextView(this);
-            wallpaperHintText.setText("To use own wallpaper put image to DamnWrapper32_ARMv7/setup");
+            wallpaperHintText.setText("To use own wallpaper put image to DamnWrapper32_FV2022/setup");
             wallpaperHintText.setTextColor(Color.GRAY);
             wallpaperHintText.setTextSize(10f);
             wallpaperHintText.setGravity(Gravity.CENTER);
