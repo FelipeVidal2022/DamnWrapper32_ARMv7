@@ -8580,31 +8580,6 @@ extern "C" char* wrap___strcpy_chk(char* dest, const char* src, size_t destlen) 
     }
     return strcpy(dest, src); 
 }
-extern "C" char* wrap___strncpy_chk(char* dest, const char* src, size_t n, size_t destlen) {
-    if (src && (strstr(src, "pngConf") || strstr(src, "jungle"))) {
-        LogToJava(std::string("C-API-DEBUG: [__strncpy_chk] Копируется строка: [") + src + "]");
-    }
-    return strncpy(dest, src, n);
-}
-
-extern "C" int wrap___vsnprintf_chk(char *str, size_t maxlen, int flag, size_t bos, const char *format, va_list args) { 
-    int ret = vsnprintf(str, maxlen, format, args); 
-    if (str && (strstr(str, "pngConf") || strstr(str, "jungle"))) {
-        LogToJava(std::string("C-API-DEBUG: [__vsnprintf_chk] Собрана строка: [") + str + "]");
-    }
-    return ret; 
-}
-
-extern "C" int wrap_putc(int c, void* fp) { return fputc(c, unwrap_file(fp)); }
-extern "C" double wrap_rint(double x) { return rint(x); }
-extern "C" char* wrap_dlerror() { return (char*)""; }
-
-// Заглушки для CoreGraphics, чтобы не крашило при загрузке картинок
-extern "C" void* wrap_CGDataProviderCopyData(void* provider) { return nullptr; }
-extern "C" size_t wrap_CGImageGetBitsPerPixel(void* image) { return image ? ((HLE_CGImage*)image)->bpp : 32; }
-extern "C" void* wrap_CGImageGetColorSpace(void* image) { return wrap_CGColorSpaceCreateDeviceRGB(); }
-extern "C" void* wrap_CGImageGetDataProvider(void* image) { return image; } // Dummy
-
 extern "C" char* wrap_strcat(char* dest, const char* src) {
     char* res = strcat(dest, src);
     if (res && (strstr(res, "pngConf") || strstr(res, "jungle"))) {
@@ -9049,7 +9024,14 @@ std::map<void*, std::string> g_fileNames;
 
 extern bool g_machOLoaded;
 
+// Thread-local флаг защиты от рекурсии внутри wrap_malloc/free/etc.
+// Проблема: wrap_malloc вызывает LogToBlackBox → std::string operator= → malloc → wrap_malloc → бесконечно.
+// Решение: если мы уже внутри wrap_malloc на этом потоке, вызываем malloc напрямую без логирования.
+static thread_local bool g_inWrapMalloc = false;
+
 extern "C" void* wrap_malloc(size_t size) {
+    if (g_inWrapMalloc) return malloc(size);
+    g_inWrapMalloc = true;
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     void* res = malloc(size);
     if (size > 5 * 1024 * 1024) {
@@ -9057,9 +9039,12 @@ extern "C" void* wrap_malloc(size_t size) {
     } else if (g_machOLoaded) {
         LogToBlackBox("C-API-MEM: [malloc] ptr=" + std::to_string((uintptr_t)res) + " size=" + std::to_string(size) + " Caller: " + GetModuleInfoForAddress(lr));
     }
+    g_inWrapMalloc = false;
     return res;
 }
 extern "C" void* wrap_calloc(size_t num, size_t size) {
+    if (g_inWrapMalloc) return calloc(num, size);
+    g_inWrapMalloc = true;
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     void* res = calloc(num, size);
     if (num * size > 5 * 1024 * 1024) {
@@ -9067,9 +9052,12 @@ extern "C" void* wrap_calloc(size_t num, size_t size) {
     } else if (g_machOLoaded) {
         LogToBlackBox("C-API-MEM: [calloc] ptr=" + std::to_string((uintptr_t)res) + " num=" + std::to_string(num) + " size=" + std::to_string(size) + " Caller: " + GetModuleInfoForAddress(lr));
     }
+    g_inWrapMalloc = false;
     return res;
 }
 extern "C" void* wrap_realloc(void* ptr, size_t size) {
+    if (g_inWrapMalloc) return realloc(ptr, size);
+    g_inWrapMalloc = true;
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     void* res = realloc(ptr, size);
     if (size > 5 * 1024 * 1024) {
@@ -9077,14 +9065,18 @@ extern "C" void* wrap_realloc(void* ptr, size_t size) {
     } else if (g_machOLoaded) {
         LogToBlackBox("C-API-MEM: [realloc] old_ptr=" + std::to_string((uintptr_t)ptr) + " new_ptr=" + std::to_string((uintptr_t)res) + " size=" + std::to_string(size) + " Caller: " + GetModuleInfoForAddress(lr));
     }
+    g_inWrapMalloc = false;
     return res;
 }
 extern "C" void wrap_free(void* ptr) {
+    if (g_inWrapMalloc) { free(ptr); return; }
+    g_inWrapMalloc = true;
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     if (g_machOLoaded && ptr) {
         LogToBlackBox("C-API-MEM: [free] ptr=" + std::to_string((uintptr_t)ptr) + " Caller: " + GetModuleInfoForAddress(lr));
     }
     free(ptr);
+    g_inWrapMalloc = false;
 }
 
 // Хелпер для извлечения реального Android FILE* из нашей фейковой iOS структуры
@@ -10206,10 +10198,7 @@ std::map<std::string, void*> g_hleStubs = {
  STB_W(CFStringGetCStringPtr), STB_W(CFStringGetCString), STB_W(CFBooleanGetTypeID), STB_W(CFBooleanGetValue), STB_W(CFDataCreate), STB_W(CFDataGetBytePtr), STB_W(CFDataGetBytes), STB_W(CFDataGetLength), STB_W(CFErrorCopyDescription), STB_W(CFGetTypeID), STB_W(CFHTTPMessageCopyHeaderFieldValue), STB_W(CFHTTPMessageCopyResponseStatusLine), STB_W(CFHTTPMessageCopySerializedMessage), STB_W(CFHTTPMessageCreateRequest), STB_W(CFHTTPMessageGetResponseStatusCode), STB_W(CFHTTPMessageSetBody), STB_W(CFHTTPMessageSetHeaderFieldValue), STB_W(CFNumberCreate), STB_W(CFNumberFormatterCreate), STB_W(CFNumberFormatterGetValueFromString), STB_W(CFNumberGetType), STB_W(CFNumberGetTypeID), STB_W(CFNumberGetValue), STB_W(CFPreferencesCopyAppValue), STB_W(CFPreferencesCopyKeyList), STB_W(CFPreferencesSetValue), STB_W(CFPreferencesSynchronize), STB_W(CFReadStreamClose), STB_W(CFReadStreamCreateForHTTPRequest), STB_W(CFReadStreamOpen), STB_W(CFReadStreamScheduleWithRunLoop), STB_W(CFReadStreamSetClient), STB_W(CFReadStreamSetProperty), STB_W(CFRunLoopAddTimer), STB_W(CFRunLoopRunInMode), STB_W(CFRunLoopTimerCreate), STB_W(CFRunLoopTimerInvalidate), STB_W(CFAllocatorGetDefault), STB_W(CFBundleGetVersionNumber), STB_W(CFDictionaryGetValueIfPresent), STB_W(CFNotificationCenterGetLocalCenter), STB_W(CFStringAppend), STB_W(CFStringAppendFormat), STB_W(CFStringAppendCharacters), STB_W(CFStringCompare), STB_W(CFStringConvertEncodingToIANACharSetName), STB_W(CFStringConvertEncodingToNSStringEncoding), STB_W(CFStringConvertIANACharSetNameToEncoding), STB_W(CFStringConvertNSStringEncodingToEncoding), STB_W(CFStringCreateArrayBySeparatingStrings), STB_W(CFStringCreateCopy), STB_W(CFStringCreateMutable), STB_W(CFStringCreateMutableCopy), STB_W(CFStringCreateWithFormat), STB_W(CFStringCreateWithSubstring), STB_W(CFStringFind), STB_W(CFStringHasPrefix), STB_W(CFStringHasSuffix), STB_W(CFURLCreateStringByReplacingPercentEscapesUsingEncoding),
  STB_W(CFStringCreateExternalRepresentation), STB_W(CFStringCreateFromExternalRepresentation), STB_W(CFStringCreateWithCStringNoCopy), STB_W(CFStringCreateWithCharacters), STB_W(CFStringGetCharacters), STB_W(CFStringGetMaximumSizeForEncoding), STB_W(CFStringGetTypeID), STB_W(CFURLCreateFromFileSystemRepresentation), STB_W(CFURLCreateStringByAddingPercentEscapes), STB_W(CFURLCreateStringByReplacingPercentEscapes), STB_W(CFURLCreateWithString), STB_W(CFArrayCreate), STB_W(CFArrayCreateMutable), STB_W(CFArrayGetCount), STB_W(CFArrayGetValueAtIndex), STB_W(CFArrayAppendValue), STB_W(CFArrayRemoveAllValues), STB_W(CFDictionaryCreateMutable), STB_W(CFDictionaryGetValue), STB_W(CFDictionarySetValue), STB_W(CFDictionaryRemoveValue), STB_W(CFBundleGetInfoDictionary), STB_W(CFBundleGetMainBundle), STB_W(CFBundleGetIdentifier), STB_W(CFBundleGetValueForInfoDictionaryKey), STB_W(CFBundleCopyResourcesDirectoryURL), STB_W(CFURLCopyFileSystemPath), STB_W(CFURLGetFileSystemRepresentation), STB_W(CFRunLoopGetCurrent), STB_W(CFRunLoopGetMain), STB_W(CFUUIDCreate), STB_W(CFUUIDCreateString), STB_W(CFTimeZoneCopySystem), STB_W(CFTimeZoneCopyDefault), STB_W(CFTimeZoneGetName), STB_W(CFTimeZoneGetSecondsFromGMT), STB_W(CFAbsoluteTimeGetGregorianDate), STB_W(CFAbsoluteTimeGetDayOfWeek), STB_W(CC_MD5), STB_W(CC_SHA1), STB_W(CC_SHA256), STB_W(CCCrypt), STB_W(CCCryptorCreate), STB_W(CCCryptorUpdate), STB_W(CCCryptorFinal), STB_W(CCCryptorRelease), STB_W(CCCryptorGetOutputLength), STB_W(AudioComponentFindNext), STB_W(AudioComponentInstanceNew), STB_W(UIGraphicsGetCurrentContext), STB_W(UIGraphicsPushContext), STB_W(UIGraphicsPopContext), STB_W(UIGraphicsBeginImageContext), STB_W(UIGraphicsEndImageContext), STB_W(UIGraphicsGetImageFromCurrentImageContext), STB_W(UIRectFill), STB_W(UIImagePNGRepresentation), STB_W(NSAllocateObject), STB_W(NSStringFromClass), STB_W(NSStringFromSelector), STB_W(CFBitVectorCreate), STB_W(CFBitVectorCreateMutableCopy), STB_W(CFBitVectorGetBitAtIndex), STB_W(CFBitVectorSetBitAtIndex),
     STB_V(kCFAllocatorDefault), STB_V(kCFAllocatorNull), STB_V(kCFBooleanFalse), STB_V(kCFBooleanTrue), STB_V(kCFErrorDescriptionKey), STB_V(kCFHTTPVersion1_1), STB_V(kCFPreferencesAnyHost), STB_V(kCFPreferencesCurrentUser), STB_V(kCFStreamPropertyHTTPResponseHeader), STB_V(kCFStreamPropertyHTTPShouldAutoredirect), STB_V(kSecAttrAccessGroup), STB_V(kSecAttrAccount), STB_V(kSecAttrGeneric), STB_V(kSecAttrService), STB_V(kSecClass), STB_V(kSecClassGenericPassword), STB_V(kSecMatchLimit), STB_V(kSecMatchLimitOne), STB_V(kSecReturnAttributes), STB_V(kSecReturnData), STB_V(kSecValueData), STB_V(kCFRunLoopDefaultMode), STB_V(kCFRunLoopCommonModes), STB_V(kCFTypeArrayCallBacks), STB_V(kCFTypeDictionaryKeyCallBacks), STB_V(kCFTypeDictionaryValueCallBacks), STB_V(kCFBundleIdentifierKey), STB_V(kCFNumberNaN), STB_V(kCFNumberNegativeInfinity), STB_V(kCFNumberPositiveInfinity), {"_ADBannerContentSizeIdentifierLandscape", (void*)&hle_ADBannerContentSizeIdentifierLandscape_ptr}, {"_ADBannerContentSizeIdentifierPortrait", (void*)&hle_ADBannerContentSizeIdentifierPortrait_ptr},
-
-    STB_W(__strncpy_chk), STB_W(__vsnprintf_chk), STB_W(putc), STB_W(rint), STB_W(dlerror), {"__exit", (void*)Stub_exit},
-    STB_W(CGDataProviderCopyData), STB_W(CGImageGetBitsPerPixel), STB_W(CGImageGetColorSpace), STB_W(CGImageGetDataProvider)
-
+    
     STB_W(alcOpenDevice), STB_W(alcCreateContext), STB_W(alcMakeContextCurrent), STB_W(alGenSources), STB_W(alGenBuffers), STB_W(alSourcei), STB_W(alSourcef), STB_W(alBufferData), STB_W(alSourceQueueBuffers), STB_W(alSourcePlay), STB_W(alSourceStop), STB_W(alDeleteBuffers), STB_W(alDeleteSources), STB_W(alGetSourcei), STB_W(alListenerf), STB_W(alSource3f), STB_W(alcCloseDevice), STB_W(alcDestroyContext), STB_W(alcGetString), STB_W(alcProcessContext), STB_W(alcSuspendContext), STB_W(AudioServicesPlaySystemSound), STB_W(AudioServicesCreateSystemSoundID), STB_W(AudioServicesDisposeSystemSoundID), STB_W(CGBitmapContextCreate), STB_W(CGBitmapContextCreateImage), STB_W(CGBitmapContextGetData), STB_W(CGColorSpaceCreateDeviceRGB), STB_W(CGColorSpaceRelease), STB_W(CGContextDrawImage), STB_W(CGImageGetHeight), STB_W(CGImageGetWidth), STB_W(CGImageGetAlphaInfo), STB_W(CGImageGetBitsPerComponent), STB_W(CGContextRelease), STB_W(CGImageRelease), STB_W(CGColorGetComponents), STB_W(CGColorGetColorSpace), STB_W(CGColorSpaceGetModel), STB_W(CGGradientCreateWithColors), STB_W(CGContextSaveGState), STB_W(CGContextRestoreGState), STB_W(CGContextScaleCTM), STB_W(CGContextTranslateCTM), STB_W(CGContextSetFillColor), STB_W(CGContextSetRGBFillColor), STB_W(CGContextSetFillColorWithColor), STB_W(CGContextSetStrokeColor), STB_W(CGContextSetRGBStrokeColor), STB_W(CGContextSetStrokeColorWithColor), STB_W(CGContextSetLineWidth), STB_W(CGContextBeginPath), STB_W(CGContextClosePath), STB_W(CGContextMoveToPoint), STB_W(CGContextAddLineToPoint), STB_W(CGContextAddRect), STB_W(CGContextAddArc), STB_W(CGContextAddArcToPoint), STB_W(CGContextStrokePath), STB_W(CGContextFillPath), STB_W(CGContextFillRect), STB_W(CGContextStrokeLineSegments), STB_W(CGContextSetStrokeColorSpace), STB_W(NSClassFromString), STB_W(NSSelectorFromString),
     {"_SCNetworkReachabilityScheduleWithRunLoop", (void*)+[](void* target, void* runLoop, void* runLoopMode) -> bool { return true; }}, {"_SCNetworkReachabilitySetCallback", (void*)+[](void* target, void* callout, void* context) -> bool { return true; }}, {"_SCNetworkReachabilityUnscheduleFromRunLoop", (void*)+[](void* target, void* runLoop, void* runLoopMode) -> bool { return true; }},
     {"__Block_object_assign", (void*)wrap_Block_object_assign}, {"__Block_copy", (void*)wrap_Block_copy}, {"__Block_release", (void*)wrap_Block_release},
