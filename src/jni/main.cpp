@@ -2097,13 +2097,35 @@ std::map<GLuint, int> g_cpuTexH;
 GLuint g_cpuActiveTexture = 0;
 extern int g_clientActiveTexture;
 
+// Вспомогательная функция для вычисления точного размера текстуры в байтах
+static inline size_t SafeGetGLTextureSize(GLsizei width, GLsizei height, GLenum format, GLenum type) {
+    size_t bpp = 4;
+    if (format == GL_RGB && type == 0x8363) bpp = 2; // GL_UNSIGNED_SHORT_5_6_5
+    else if (format == GL_RGBA && type == 0x8033) bpp = 2; // GL_UNSIGNED_SHORT_4_4_4_4
+    else if (format == GL_RGBA && type == 0x8034) bpp = 2; // GL_UNSIGNED_SHORT_5_5_5_1
+    else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) bpp = 3;
+    else if (format == GL_ALPHA && type == GL_UNSIGNED_BYTE) bpp = 1;
+    else if (format == 0x1909 && type == GL_UNSIGNED_BYTE) bpp = 1; // GL_LUMINANCE
+    else if (format == 0x190A && type == GL_UNSIGNED_BYTE) bpp = 2; // GL_LUMINANCE_ALPHA
+    else if (format == 0x80E1 && type == GL_UNSIGNED_BYTE) bpp = 4; // GL_BGRA_EXT
+
+    // НАМЕРЕННО не вызываем glGetIntegerv(GL_UNPACK_ALIGNMENT) — это может вызвать
+    // краш в MTK-драйвере при вызове из промежуточного состояния GL-контекста.
+    // Используем alignment=1: чуть консервативнее по памяти, но полностью безопасно.
+    return (size_t)width * (size_t)height * bpp;
+}
+
 extern "C" void Stub_glBindTexture(GLenum target, GLuint texture) {
     if (target == GL_TEXTURE_2D) g_cpuActiveTexture = texture;
     if (g_gpuOffloadMask & 8) glBindTexture(target, texture);
 }
 
 extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
-    LogToJava("[GL-TEX] glTexImage2D: tex=" + std::to_string(g_cpuActiveTexture) + " w=" + std::to_string(width) + " h=" + std::to_string(height) + " intFmt=0x" + std::to_string(internalformat) + " fmt=0x" + std::to_string(format) + " type=0x" + std::to_string(type) + " pixels=" + std::to_string(pixels != nullptr));
+    // Лог с hex-значениями для диагностики
+    char logbuf[256];
+    snprintf(logbuf, sizeof(logbuf), "[GL-TEX] glTexImage2D: tex=%u w=%d h=%d intFmt=0x%X fmt=0x%X type=0x%X pixels=%d",
+        g_cpuActiveTexture, width, height, (unsigned)internalformat, (unsigned)format, (unsigned)type, pixels != nullptr);
+    LogToJava(logbuf);
     if (target == GL_TEXTURE_2D && level == 0) {
         g_cpuTexW[g_cpuActiveTexture] = width;
         g_cpuTexH[g_cpuActiveTexture] = height;
@@ -2113,106 +2135,157 @@ extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalform
         if (!pixels) {
             std::fill(texBuf.begin(), texBuf.end(), 0xFF000000);
         } else {
+            // Намеренно не вызываем glGetIntegerv(GL_UNPACK_ALIGNMENT) — может крашить MTK.
+            // Используем alignment=4 (дефолт OpenGL ES; Wolf3D не меняет glPixelStorei).
             GLint align = 4;
-            glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
 
             if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
-            int rowLength = width * 4;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) memcpy(&texBuf[y*width], src + y*stride, width * 4);
-        } else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) {
-            int rowLength = width * 3;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint8_t* row = src + y * stride;
-                for (int x=0; x<width; x++) texBuf[y*width + x] = 0xFF000000 | (row[x*3+2]<<16) | (row[x*3+1]<<8) | row[x*3];
-            }
-        } else if (format == GL_RGB && type == 0x8363) { // GL_UNSIGNED_SHORT_5_6_5
-            int rowLength = width * 2;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint16_t* row = (const uint16_t*)(src + y * stride);
-                for (int x=0; x<width; x++) {
-                    uint16_t px = row[x];
-                    uint8_t r = (px >> 11) & 0x1F; r = (r << 3) | (r >> 2);
-                    uint8_t g = (px >> 5) & 0x3F;  g = (g << 2) | (g >> 4);
-                    uint8_t b = px & 0x1F;         b = (b << 3) | (b >> 2);
-                    texBuf[y*width + x] = 0xFF000000 | (b<<16) | (g<<8) | r;
+                int rowLength = width * 4;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) memcpy(&texBuf[y*width], src + y*stride, width * 4);
+            } else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) {
+                int rowLength = width * 3;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint8_t* row = src + y * stride;
+                    for (int x=0; x<width; x++) texBuf[y*width + x] = 0xFF000000 | (row[x*3+2]<<16) | (row[x*3+1]<<8) | row[x*3];
                 }
-            }
-        } else if (format == GL_RGBA && type == 0x8033) { // GL_UNSIGNED_SHORT_4_4_4_4
-            int rowLength = width * 2;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint16_t* row = (const uint16_t*)(src + y * stride);
-                for (int x=0; x<width; x++) {
-                    uint16_t px = row[x];
-                    uint8_t r = (px >> 12) & 0xF; r = (r << 4) | r;
-                    uint8_t g = (px >> 8) & 0xF;  g = (g << 4) | g;
-                    uint8_t b = (px >> 4) & 0xF;  b = (b << 4) | b;
-                    uint8_t a = px & 0xF;         a = (a << 4) | a;
-                    texBuf[y*width + x] = (a<<24) | (b<<16) | (g<<8) | r;
+            } else if (format == GL_RGB && type == 0x8363) { // GL_UNSIGNED_SHORT_5_6_5
+                int rowLength = width * 2;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint16_t* row = (const uint16_t*)(src + y * stride);
+                    for (int x=0; x<width; x++) {
+                        uint16_t px = row[x];
+                        uint8_t r = (px >> 11) & 0x1F; r = (r << 3) | (r >> 2);
+                        uint8_t g = (px >> 5) & 0x3F;  g = (g << 2) | (g >> 4);
+                        uint8_t b = px & 0x1F;         b = (b << 3) | (b >> 2);
+                        texBuf[y*width + x] = 0xFF000000 | (b<<16) | (g<<8) | r;
+                    }
                 }
-            }
-        } else if (format == GL_RGBA && type == 0x8034) { // GL_UNSIGNED_SHORT_5_5_5_1
-            int rowLength = width * 2;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint16_t* row = (const uint16_t*)(src + y * stride);
-                for (int x=0; x<width; x++) {
-                    uint16_t px = row[x];
-                    uint8_t r = (px >> 11) & 0x1F; r = (r << 3) | (r >> 2);
-                    uint8_t g = (px >> 6) & 0x1F;  g = (g << 3) | (g >> 2);
-                    uint8_t b = (px >> 1) & 0x1F;  b = (b << 3) | (b >> 2);
-                    uint8_t a = (px & 0x1) ? 255 : 0;
-                    texBuf[y*width + x] = (a<<24) | (b<<16) | (g<<8) | r;
+            } else if (format == GL_RGBA && type == 0x8033) { // GL_UNSIGNED_SHORT_4_4_4_4
+                int rowLength = width * 2;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint16_t* row = (const uint16_t*)(src + y * stride);
+                    for (int x=0; x<width; x++) {
+                        uint16_t px = row[x];
+                        uint8_t r = (px >> 12) & 0xF; r = (r << 4) | r;
+                        uint8_t g = (px >> 8) & 0xF;  g = (g << 4) | g;
+                        uint8_t b = (px >> 4) & 0xF;  b = (b << 4) | b;
+                        uint8_t a = px & 0xF;         a = (a << 4) | a;
+                        texBuf[y*width + x] = (a<<24) | (b<<16) | (g<<8) | r;
+                    }
                 }
-            }
-        } else if (format == 0x80E1 && type == GL_UNSIGNED_BYTE) { // GL_BGRA_EXT
-            int rowLength = width * 4;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint32_t* row = (const uint32_t*)(src + y * stride);
-                for (int x=0; x<width; x++) {
-                    uint32_t px = row[x];
-                    uint8_t b = px & 0xFF; uint8_t g = (px >> 8) & 0xFF;
-                    uint8_t r = (px >> 16) & 0xFF; uint8_t a = (px >> 24) & 0xFF;
-                    texBuf[y*width + x] = (a<<24) | (b<<16) | (g<<8) | r;
+            } else if (format == GL_RGBA && type == 0x8034) { // GL_UNSIGNED_SHORT_5_5_5_1
+                int rowLength = width * 2;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint16_t* row = (const uint16_t*)(src + y * stride);
+                    for (int x=0; x<width; x++) {
+                        uint16_t px = row[x];
+                        uint8_t r = (px >> 11) & 0x1F; r = (r << 3) | (r >> 2);
+                        uint8_t g = (px >> 6) & 0x1F;  g = (g << 3) | (g >> 2);
+                        uint8_t b = (px >> 1) & 0x1F;  b = (b << 3) | (b >> 2);
+                        uint8_t a = (px & 0x1) ? 255 : 0;
+                        texBuf[y*width + x] = (a<<24) | (b<<16) | (g<<8) | r;
+                    }
                 }
+            } else if (format == 0x80E1 && type == GL_UNSIGNED_BYTE) { // GL_BGRA_EXT
+                int rowLength = width * 4;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint32_t* row = (const uint32_t*)(src + y * stride);
+                    for (int x=0; x<width; x++) {
+                        uint32_t px = row[x];
+                        uint8_t b = px & 0xFF; uint8_t g = (px >> 8) & 0xFF;
+                        uint8_t r = (px >> 16) & 0xFF; uint8_t a = (px >> 24) & 0xFF;
+                        texBuf[y*width + x] = (a<<24) | (b<<16) | (g<<8) | r;
+                    }
+                }
+            } else if (format == 0x1909 && type == GL_UNSIGNED_BYTE) { // GL_LUMINANCE
+                int rowLength = width * 1;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint8_t* row = src + y * stride;
+                    for (int x=0; x<width; x++) { uint8_t l = row[x]; texBuf[y*width + x] = 0xFF000000 | (l<<16) | (l<<8) | l; }
+                }
+            } else if (format == 0x190A && type == GL_UNSIGNED_BYTE) { // GL_LUMINANCE_ALPHA
+                int rowLength = width * 2;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint8_t* row = src + y * stride;
+                    for (int x=0; x<width; x++) { uint8_t l = row[x*2]; uint8_t a = row[x*2+1]; texBuf[y*width + x] = (a<<24) | (l<<16) | (l<<8) | l; }
+                }
+            } else if (format == GL_ALPHA && type == GL_UNSIGNED_BYTE) {
+                int rowLength = width * 1;
+                int stride = rowLength + ((align - (rowLength % align)) % align);
+                const uint8_t* src = (const uint8_t*)pixels;
+                for (int y=0; y<height; y++) {
+                    const uint8_t* row = src + y * stride;
+                    for (int x=0; x<width; x++) texBuf[y*width + x] = (row[x]<<24) | 0x00FFFFFF;
+                }
+            } else {
+                std::fill(texBuf.begin(), texBuf.end(), 0xFFFF00FF);
             }
-        } else if (format == 0x1909 && type == GL_UNSIGNED_BYTE) { // GL_LUMINANCE
-            int rowLength = width * 1;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint8_t* row = src + y * stride;
-                for (int x=0; x<width; x++) { uint8_t l = row[x]; texBuf[y*width + x] = 0xFF000000 | (l<<16) | (l<<8) | l; }
-            }
-        } else if (format == 0x190A && type == GL_UNSIGNED_BYTE) { // GL_LUMINANCE_ALPHA
-            int rowLength = width * 2;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint8_t* row = src + y * stride;
-                for (int x=0; x<width; x++) { uint8_t l = row[x*2]; uint8_t a = row[x*2+1]; texBuf[y*width + x] = (a<<24) | (l<<16) | (l<<8) | l; }
-            }
-        } else if (format == GL_ALPHA && type == GL_UNSIGNED_BYTE) {
-            int rowLength = width * 1;
-            int stride = rowLength + ((align - (rowLength % align)) % align);
-            const uint8_t* src = (const uint8_t*)pixels;
-            for (int y=0; y<height; y++) {
-                const uint8_t* row = src + y * stride;
-                for (int x=0; x<width; x++) texBuf[y*width + x] = (row[x]<<24) | 0x00FFFFFF;
-            }
-        } else {
-            std::fill(texBuf.begin(), texBuf.end(), 0xFFFF00FF);
         }
+    }
+
+    // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
+
+    GLenum hw_format = format;
+    GLenum hw_internalformat = (GLenum)internalformat;
+
+    // Нормализуем GLES1-стиль internalformat (числа 1–4) в реальные enum-ы GLES2.
+    // iOS/GLES1.1 позволял передавать кол-во компонент (1=LUMINANCE, 2=LUMINANCE_ALPHA,
+    // 3=RGB, 4=RGBA). MTK-драйвер на GLES2 это не понимает и крашит.
+    if (hw_internalformat == 1) hw_internalformat = GL_LUMINANCE;
+    else if (hw_internalformat == 2) hw_internalformat = GL_LUMINANCE_ALPHA;
+    else if (hw_internalformat == 3) hw_internalformat = GL_RGB;
+    else if (hw_internalformat == 4) hw_internalformat = GL_RGBA;
+    // Нормализуем нестандартные значения (BGRA_EXT как internalformat, и пр.)
+    else if (hw_internalformat == 0x80E1) hw_internalformat = GL_RGBA; // GL_BGRA_EXT
+    else if (hw_internalformat != GL_RGBA && hw_internalformat != GL_RGB &&
+             hw_internalformat != GL_ALPHA && hw_internalformat != GL_LUMINANCE &&
+             hw_internalformat != GL_LUMINANCE_ALPHA) {
+        hw_internalformat = hw_format; // Fallback: берём format
+    }
+
+    std::vector<uint8_t> converted_buf;
+    const GLvoid* safe_pixels = pixels;
+
+    if (format == 0x80E1 && type == GL_UNSIGNED_BYTE) {
+        // GL_BGRA_EXT -> GL_RGBA: свапаем R и B каналы
+        hw_format = GL_RGBA;
+        hw_internalformat = GL_RGBA;
+        if (pixels) {
+            size_t totalBytes = (size_t)width * height * 4;
+            converted_buf.resize(totalBytes);
+            const uint8_t* src = (const uint8_t*)pixels;
+            uint8_t* dst = converted_buf.data();
+            for (size_t i = 0; i < (size_t)width * height; i++) {
+                dst[i*4+0] = src[i*4+2]; // R <- B
+                dst[i*4+1] = src[i*4+1]; // G
+                dst[i*4+2] = src[i*4+0]; // B <- R
+                dst[i*4+3] = src[i*4+3]; // A
+            }
+            safe_pixels = converted_buf.data();
+        }
+    } else if (pixels != nullptr) {
+        // Всегда копируем в свой буфер — MTK требует выровненную память
+        size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
+        if (totalBytes > 0) {
+            converted_buf.resize(totalBytes);
+            memcpy(converted_buf.data(), pixels, totalBytes);
+            safe_pixels = converted_buf.data();
         }
     }
     if (g_gpuOffloadMask & 8) glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
@@ -2225,8 +2298,9 @@ extern "C" void Stub_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, 
         int texH = g_cpuTexH[g_cpuActiveTexture];
         
         if (xoffset >= 0 && yoffset >= 0 && xoffset + width <= texW && yoffset + height <= texH) {
+            // Не вызываем glGetIntegerv(GL_UNPACK_ALIGNMENT) — может крашить MTK.
+            // Используем дефолтный alignment=4.
             GLint align = 4;
-            glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
 
             if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
                 int rowLength = width * 4;
@@ -9122,7 +9196,36 @@ std::map<void*, std::string> g_fileNames;
 
 extern bool g_machOLoaded;
 
+// Защита от рекурсии внутри wrap_malloc/free/etc.
+//
+// ПОЧЕМУ НЕ thread_local:
+//   На Android NDK thread_local в .so реализован через __emutls_get_address,
+//   который при ПЕРВОМ обращении сам вызывает malloc → wrap_malloc → рекурсия.
+//   pthread_getspecific — единственный TLS-механизм безопасный внутри malloc.
+//
+// Схема: pthread_key инициализируется один раз через pthread_once.
+//   Значение ключа: NULL = не в malloc, (void*)1 = уже внутри.
+//   pthread_getspecific/setspecific не делают malloc — они безопасны.
+
+static pthread_key_t  g_wrapMallocKey;
+static pthread_once_t g_wrapMallocKeyOnce = PTHREAD_ONCE_INIT;
+
+static void _wrapMallocKeyCreate() {
+    pthread_key_create(&g_wrapMallocKey, nullptr);
+}
+
+// inline: вызывается очень часто, важна скорость
+static inline bool _inWrapMalloc() {
+    pthread_once(&g_wrapMallocKeyOnce, _wrapMallocKeyCreate);
+    return pthread_getspecific(g_wrapMallocKey) != nullptr;
+}
+static inline void _setInWrapMalloc(bool v) {
+    pthread_setspecific(g_wrapMallocKey, v ? (void*)1 : nullptr);
+}
+
 extern "C" void* wrap_malloc(size_t size) {
+    if (_inWrapMalloc()) return malloc(size);
+    _setInWrapMalloc(true);
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     void* res = malloc(size);
     if (size > 5 * 1024 * 1024) {
@@ -9130,9 +9233,12 @@ extern "C" void* wrap_malloc(size_t size) {
     } else if (g_machOLoaded) {
         LogToBlackBox("C-API-MEM: [malloc] ptr=" + std::to_string((uintptr_t)res) + " size=" + std::to_string(size) + " Caller: " + GetModuleInfoForAddress(lr));
     }
+    _setInWrapMalloc(false);
     return res;
 }
 extern "C" void* wrap_calloc(size_t num, size_t size) {
+    if (_inWrapMalloc()) return calloc(num, size);
+    _setInWrapMalloc(true);
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     void* res = calloc(num, size);
     if (num * size > 5 * 1024 * 1024) {
@@ -9140,9 +9246,12 @@ extern "C" void* wrap_calloc(size_t num, size_t size) {
     } else if (g_machOLoaded) {
         LogToBlackBox("C-API-MEM: [calloc] ptr=" + std::to_string((uintptr_t)res) + " num=" + std::to_string(num) + " size=" + std::to_string(size) + " Caller: " + GetModuleInfoForAddress(lr));
     }
+    _setInWrapMalloc(false);
     return res;
 }
 extern "C" void* wrap_realloc(void* ptr, size_t size) {
+    if (_inWrapMalloc()) return realloc(ptr, size);
+    _setInWrapMalloc(true);
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     void* res = realloc(ptr, size);
     if (size > 5 * 1024 * 1024) {
@@ -9150,14 +9259,18 @@ extern "C" void* wrap_realloc(void* ptr, size_t size) {
     } else if (g_machOLoaded) {
         LogToBlackBox("C-API-MEM: [realloc] old_ptr=" + std::to_string((uintptr_t)ptr) + " new_ptr=" + std::to_string((uintptr_t)res) + " size=" + std::to_string(size) + " Caller: " + GetModuleInfoForAddress(lr));
     }
+    _setInWrapMalloc(false);
     return res;
 }
 extern "C" void wrap_free(void* ptr) {
+    if (_inWrapMalloc()) { free(ptr); return; }
+    _setInWrapMalloc(true);
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     if (g_machOLoaded && ptr) {
         LogToBlackBox("C-API-MEM: [free] ptr=" + std::to_string((uintptr_t)ptr) + " Caller: " + GetModuleInfoForAddress(lr));
     }
     free(ptr);
+    _setInWrapMalloc(false);
 }
 
 // Хелпер для извлечения реального Android FILE* из нашей фейковой iOS структуры
@@ -10383,14 +10496,14 @@ void* CreateDynamicStub(const std::string& name) {
     uint32_t* stub = (uint32_t*)(exec_mem + offset);
     
     // ARM32 Машинный код: Безопасный вызов LogDynamicStub(name_str, lr) и возврат 0
-    stub[0] = 0xE92D401F; // push {r0, r1, r2, r3, r4, lr} (выравнивание стека)
-    stub[1] = 0xE59F0014; // ldr r0, [pc, #20] -> name_str (первый аргумент)
-    stub[2] = 0xE1A0100E; // mov r1, lr -> оригинальный LR (второй аргумент)
+    stub[0] = 0xE92D401F; // push {r0, r1, r2, r3, r4, lr}
+    stub[1] = 0xE59F0014; // ldr r0, [pc, #20] -> name_str
+    stub[2] = 0xE1A0100E; // mov r1, lr -> оригинальный LR
     stub[3] = 0xE59FC010; // ldr r12, [pc, #16] -> LogDynamicStub
     stub[4] = 0xE12FFF3C; // blx r12
     stub[5] = 0xE8BD401F; // pop {r0, r1, r2, r3, r4, lr}
-    stub[6] = 0xE3A00000; // mov r0, #0 (возвращаем 0)
-    stub[7] = 0xE12FFF1E; // bx lr (возврат в игру)
+    stub[6] = 0xE3A00000; // mov r0, #0
+    stub[7] = 0xE12FFF1E; // bx lr
     stub[8] = (uint32_t)name_str;
     stub[9] = (uint32_t)(void*)LogDynamicStub;
     
@@ -10398,6 +10511,51 @@ void* CreateDynamicStub(const std::string& name) {
     
     offset += 64;
     g_missingSymbolAddrs[(uintptr_t)stub] = name;
+    return stub;
+}
+
+// --- ТРАМПЛИН ДЛЯ ВЫРАВНИВАНИЯ СТЕКА (АДАПТАЦИЯ IOS ABI -> ANDROID AAPCS) ---
+// Спасает драйвера MTK/Mali от SIGBUS/SIGSEGV при вызове тяжелых OpenGL функций
+void* CreateAlignedTrampoline(void* real_func) {
+    static uint8_t* exec_mem = nullptr;
+    static int offset = 0;
+    if (!exec_mem) {
+        exec_mem = (uint8_t*)mmap(nullptr, 1024 * 1024, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (exec_mem == MAP_FAILED) return real_func;
+    }
+    if (offset >= (1024 * 1024) - 80) return real_func;
+    
+    uint32_t* stub = (uint32_t*)(exec_mem + offset);
+    
+    stub[0] = 0xE92D000F; // push {r0-r3}           ; Безопасно сохраняем аргументы R0-R3
+    stub[1] = 0xE92D4010; // push {r4, lr}          ; Сохраняем R4 и LR
+    stub[2] = 0xE1A0400D; // mov r4, sp             ; R4 = оригинальный SP (до выравнивания)
+    stub[3] = 0xE3CDD007; // bic sp, sp, #7         ; Выравниваем SP до 8 байт (AAPCS)
+    stub[4] = 0xE24DD020; // sub sp, sp, #32        ; Выделяем 32 байта (8 аргументов) на новом стеке
+    
+    // --- БЕЗОПАСНОЕ КОПИРОВАНИЕ СТЕКА (Без использования R5-R11) ---
+    stub[5] = 0xE284C018; // add ip, r4, #24        ; IP указывает на аргументы в оригинальном стеке
+    stub[6] = 0xE8BC000F; // ldmia ip!, {r0-r3}     ; Читаем первые 16 байт аргументов (используя R0-R3 как буфер)
+    stub[7] = 0xE8AD000F; // stmia sp!, {r0-r3}     ; Пишем их в новый выровненный стек
+    stub[8] = 0xE89C000F; // ldmia ip, {r0-r3}      ; Читаем следующие 16 байт
+    stub[9] = 0xE88D000F; // stmia sp, {r0-r3}      ; Пишем их
+    stub[10]= 0xE24DD010; // sub sp, sp, #16        ; Возвращаем SP на начало выделенных 32 байт
+    // ---------------------------------------------------------------
+    
+    stub[11]= 0xE284C008; // add ip, r4, #8         ; IP указывает на сохраненные в начале R0-R3
+    stub[12]= 0xE89C000F; // ldmia ip, {r0-r3}      ; Восстанавливаем оригинальные аргументы для функции
+    
+    stub[13]= 0xE59FC010; // ldr ip, [pc, #16]      ; Загружаем указатель на C++ обертку
+    stub[14]= 0xE12FFF3C; // blx ip                 ; ПРЫЖОК В C++ (С идеальным стеком и целыми регистрами)
+    
+    stub[15]= 0xE1A0D004; // mov sp, r4             ; Возвращаем старый (невыровненный) SP
+    stub[16]= 0xE8BD4010; // pop {r4, lr}           ; Восстанавливаем контекст
+    stub[17]= 0xE28DD010; // add sp, sp, #16        ; Снимаем R0-R3 со стека
+    stub[18]= 0xE12FFF1E; // bx lr                  ; Возврат в игру
+    stub[19]= (uint32_t)real_func;                  // Адрес C++ функции
+    
+    __builtin___clear_cache((char*)stub, (char*)(stub + 20));
+    offset += 80;
     return stub;
 }
 // --------------------------------------------------------------
@@ -10419,6 +10577,22 @@ void* ResolveSymbol(const std::string& name) {
         if (stubPtr != (void*)Stub_GenericUnimplemented) {
             if (!g_machOLoaded) g_implementedSymbols[hleName] = true;
             else if (!g_implementedSymbols.count(hleName)) { LogToJava("C-API-IMPLEMENTED: " + hleName); g_implementedSymbols[hleName] = true; }
+            
+            // ВАЖНО: Применяем защиту выравнивания стека ко всем тяжелым функциям OpenGL/OpenAL.
+            bool needs_align = (hleName.find("_gl") == 0 || hleName.find("_alc") == 0 || hleName.find("_alS") == 0);
+            
+            // Исключаем функции, которые используют макрос __builtin_return_address для дебаггера
+            if (hleName == "_glGetIntegerv" || hleName == "_glGetFloatv" || hleName == "_glScissor" || 
+                hleName == "_glGetRenderbufferParameteriv" || hleName == "_glGetRenderbufferParameterivOES") {
+                needs_align = false;
+            }
+            
+            if (needs_align) {
+                static std::map<void*, void*> trampolines;
+                if (!trampolines.count(stubPtr)) trampolines[stubPtr] = CreateAlignedTrampoline(stubPtr);
+                return trampolines[stubPtr];
+            }
+            
             return stubPtr;
         }
     }
@@ -10895,7 +11069,7 @@ void LoadMachO(const std::string& bundlePath) {
                             bool isCode = (sectname == "__text" || sectname == "__symbol_stub" || sectname == "__stub_helper" || sectname == "__picsymbolstub");
                             bool isString = (sectname == "__cstring" || sectname == "__objc_methname" || sectname == "__objc_classname" || sectname == "__objc_methtype");
                             
-                            if (isCode && sect.size > 0) {
+                                if (isCode && sect.size > 0) {
                                 LogToJava("REBASE-TRACE: Кастомный парсер сканирует секцию: " + sectname + " (размер: " + std::to_string(sect.size) + ")");
                                 uint32_t current_addr = sect.addr;
                                 const uint8_t* code = (const uint8_t*)(sect.addr + g_appSlide);
@@ -10915,6 +11089,7 @@ void LoadMachO(const std::string& bundlePath) {
                                     
                                     uint32_t literal_addr = 0;
                                     bool is_ldr_pc = false;
+                                    uint32_t target_rd = 0;
                                     
                                     // 16-bit LDR Rx, [PC, #imm8] (0x4800)
                                     if (insn_size == 2 && (hw1 & 0xF800) == 0x4800) {
@@ -10922,37 +11097,58 @@ void LoadMachO(const std::string& bundlePath) {
                                         uint32_t offset = imm8 * 4;
                                         uint32_t pc = current_addr + 4; 
                                         literal_addr = (pc & ~3) + offset;
+                                        target_rd = (hw1 >> 8) & 7;
                                         is_ldr_pc = true;
                                     }
-                                    // 32-bit LDR.W Rx, [PC, #imm12] (0xF85F)
+                                    // 32-bit LDR.W Rx, [PC, +/-imm12] (0xF85F or 0xF8DF)
                                     else if (insn_size == 4) {
                                         uint16_t hw2 = *(ptr + 1);
                                         if ((hw1 & 0xFF7F) == 0xF85F) {
                                             uint32_t offset = hw2 & 0x0FFF;
                                             uint32_t pc = current_addr + 4;
-                                            literal_addr = (pc & ~3) + offset;
+                                            // Проверяем U-бит (направление смещения)
+                                            if ((hw1 & 0x0080) == 0) literal_addr = (pc & ~3) - offset;
+                                            else literal_addr = (pc & ~3) + offset;
+                                            
+                                            target_rd = (hw2 >> 12) & 15;
                                             is_ldr_pc = true;
                                         }
                                     }
                                     
                                     if (is_ldr_pc && literal_addr >= min_vmaddr && literal_addr < max_vmaddr) {
-                                        bool is_valid_memory = false;
-                                        uint32_t shifted_literal = literal_addr + g_appSlide;
-                                        for (const auto& sInfo : g_machoSections) {
-                                            if (shifted_literal >= sInfo.start && shifted_literal < sInfo.end) {
-                                                is_valid_memory = true;
-                                                break;
+                                        // Интеллектуальный Lookahead: Ищем ADD Rd, PC (паттерн позиционно-независимого кода)
+                                        bool is_pic_offset = false;
+                                        const uint16_t* scan_ptr = ptr + (insn_size / 2);
+                                        for (int i = 0; i < 12 && (const uint8_t*)scan_ptr < code + code_size; i++) {
+                                            uint16_t scan_hw = *scan_ptr;
+                                            if (target_rd < 8 && scan_hw == (0x4478 | target_rd)) {
+                                                is_pic_offset = true; break;
+                                            } else if (target_rd >= 8 && scan_hw == (0x44F8 | (target_rd & 7))) {
+                                                is_pic_offset = true; break;
                                             }
+                                            scan_ptr += GetThumbInstructionSize(scan_hw) / 2;
                                         }
-                                        
-                                        if (is_valid_memory) {
-                                            uint32_t val = 0;
-                                            memcpy(&val, (void*)shifted_literal, 4);
+
+                                        // Если это НЕ относительное PIC смещение, значит это абсолютный указатель - делаем ребейз
+                                        if (!is_pic_offset) {
+                                            bool is_valid_memory = false;
+                                            uint32_t shifted_literal = literal_addr + g_appSlide;
+                                            for (const auto& sInfo : g_machoSections) {
+                                                if (shifted_literal >= sInfo.start && shifted_literal < sInfo.end) {
+                                                    is_valid_memory = true;
+                                                    break;
+                                                }
+                                            }
                                             
-                                            if (val >= min_vmaddr && val < max_vmaddr && val > 0x1000) {
-                                                val += g_appSlide;
-                                                memcpy((void*)shifted_literal, &val, 4);
-                                                modified_literals++;
+                                            if (is_valid_memory) {
+                                                uint32_t val = 0;
+                                                memcpy(&val, (void*)shifted_literal, 4);
+                                                
+                                                if (val >= min_vmaddr && val < max_vmaddr && val > 0x1000) {
+                                                    val += g_appSlide;
+                                                    memcpy((void*)shifted_literal, &val, 4);
+                                                    modified_literals++;
+                                                }
                                             }
                                         }
                                     }
@@ -10963,9 +11159,8 @@ void LoadMachO(const std::string& bundlePath) {
                                     parsed_count++;
                                 }
                                 LogToJava("CUSTOM-PARSER: Успешно разобрано " + std::to_string(parsed_count) + " инструкций.");
-                                LogToJava("CUSTOM-PARSER: Изменено указателей в пулах: " + std::to_string(modified_literals));
+                                LogToJava("CUSTOM-PARSER: Изменено абсолютных указателей в пулах: " + std::to_string(modified_literals));
                             } else if (!isString && sect.size > 0) {
-
                                 LogToJava("REBASE-TRACE: Эвристический ребейз секции данных: " + sectname);
                                 uint32_t* ptr = (uint32_t*)(sect.addr + g_appSlide);
                                 uint32_t count = sect.size / 4;
@@ -11190,10 +11385,14 @@ void* NativeExecutionThread(void* arg) {
     uint32_t entry = g_entryPoint;
     
     // ВАЖНО: Стартовая точка iOS-приложений (crt1.o _start) не использует C-соглашение о вызовах!
-    // Она ожидает, что ядро (XNU) положило аргументы прямо на стек в определенном порядке.
+    // ИСПРАВЛЕНИЕ: ЖЕСТКОЕ ВЫРАВНИВАНИЕ СТЕКА К 8 БАЙТАМ для защиты драйверов MediaTek/Mali
     asm volatile (
-        "mov r0, #0\n"       // Выделяем 0 для NULL-указателей
-        "push {r0}\n"        // Padding для выравнивания стека (8 байт по стандарту ARM)
+        "mov r0, #0\n"
+        "mov r12, sp\n"
+        "bic r12, r12, #7\n"
+        "mov sp, r12\n"
+   // <--- КРИТИЧЕСКИЙ ФИКС: Сбрасываем 3 младших бита SP (выравнивание до 8)
+        "push {r0}\n"        // Padding для выравнивания стека (8 байт по стандарту ARM AAPCS)
         "push {r0}\n"        // apple[0] (доп. данные Mach-O, оставляем NULL)
         "push {r0}\n"        // envp[0]  (переменные окружения, NULL)
         "push {r0}\n"        // argv[1]  (конец списка аргументов, NULL)
@@ -11209,7 +11408,6 @@ void* NativeExecutionThread(void* arg) {
     LogToJava("NativeExecutionThread: Выход из iOS.");
     return nullptr;
 }
-
 
 // --- ЗАГЛУШКИ C++ ABI ДЛЯ STD::STRING (libstdc++ GCC 4.2) ---
 struct LibStdStringRep {
