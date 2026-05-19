@@ -92,6 +92,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
     private LinearLayout commandsLayout;
     private LinearLayout loggingFiltersLayout;
     private LinearLayout loggingSpamFiltersLayout;
+    private LinearLayout gpuOffloadLayout;
     private android.widget.CheckBox ignoreIpaCheckbox;
     private android.widget.CheckBox onScreenDebugOverlayCheckbox;
     private android.widget.CheckBox showPerfOverlayCheckbox;
@@ -151,7 +152,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
     private static final String APPS_INSTALLED_DIR = WORK_DIR + "apps_installed/";
     private static final String SETUP_DIR = WORK_DIR + "setup/";
 
-    public native void initWrapper(String workDir, String appBundlePath, String bundleId, boolean logRender, boolean logSound, boolean logFs, boolean logNet, boolean logTodo, boolean logRenderDebug, boolean logFuncList, boolean logHiddenClasses, boolean logOther, int spamFiltersMask, boolean onScreenDebugOverlay, boolean showPerfOverlay, boolean nativeRootMmap, int resWidth, int resHeight, int esMode);
+    public native void initWrapper(String workDir, String appBundlePath, String bundleId, boolean logRender, boolean logSound, boolean logFs, boolean logNet, boolean logTodo, boolean logRenderDebug, boolean logFuncList, boolean logHiddenClasses, boolean logOther, int spamFiltersMask, boolean onScreenDebugOverlay, boolean showPerfOverlay, boolean nativeRootMmap, int resWidth, int resHeight, int esMode, int gpuOffloadMask);
     public native void onSurfaceCreated(android.view.Surface surface);
     public native void onSurfaceChanged(int width, int height);
     public native void onTouchEventNative(int actionMasked, int pointerId, float x, float y);
@@ -422,6 +423,51 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
             settingsLayout.setVisibility(View.VISIBLE);
         });
 
+        android.widget.Button gpuOffloadButton = new android.widget.Button(this);
+        gpuOffloadButton.setText("GPU Offload Menu (Experimental)");
+        
+        gpuOffloadLayout = new LinearLayout(this);
+        gpuOffloadLayout.setOrientation(LinearLayout.VERTICAL);
+        gpuOffloadLayout.setGravity(Gravity.CENTER);
+        gpuOffloadLayout.setBackgroundColor(Color.BLACK);
+        gpuOffloadLayout.setVisibility(View.GONE);
+
+        String[] gpuNames = {
+            "1. EGL Context & SwapBuffers (Bit 0)", 
+            "2. glClear (Bit 1)", 
+            "3. Shaders & Uniforms (Bit 2)", 
+            "4. Textures (Bit 3)", 
+            "5. VBO, Attribs & glDraw (Bit 4)", 
+            "6. States (Blend, Depth, Cull) (Bit 5)", 
+            "7. FBO & Viewport (Bit 6)"
+        };
+
+        for (int i = 0; i < gpuNames.length; i++) {
+            android.widget.CheckBox cb = new android.widget.CheckBox(this);
+            cb.setText(gpuNames[i]);
+            cb.setTextColor(Color.WHITE);
+            cb.setChecked(getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + i, false));
+            final int bitIdx = i;
+            cb.setOnCheckedChangeListener((btnView, isChecked) -> {
+                getSharedPreferences("DamnPrefs", MODE_PRIVATE).edit().putBoolean("gpu_bit_" + bitIdx, isChecked).apply();
+            });
+            gpuOffloadLayout.addView(cb);
+        }
+
+        android.widget.Button gpuOffloadBackButton = new android.widget.Button(this);
+        gpuOffloadBackButton.setText("Back");
+        gpuOffloadLayout.addView(gpuOffloadBackButton, backParams);
+
+        gpuOffloadButton.setOnClickListener(v -> {
+            settingsLayout.setVisibility(View.GONE);
+            gpuOffloadLayout.setVisibility(View.VISIBLE);
+        });
+
+        gpuOffloadBackButton.setOnClickListener(v -> {
+            gpuOffloadLayout.setVisibility(View.GONE);
+            settingsLayout.setVisibility(View.VISIBLE);
+        });
+
         ignoreIpaCheckbox = new android.widget.CheckBox(this);
         ignoreIpaCheckbox.setText("Ignore IPA in /apps for installation with same version and package name");
         ignoreIpaCheckbox.setTextColor(Color.WHITE);
@@ -528,6 +574,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         
         settingsLayout.addView(loggingFiltersButton);
         settingsLayout.addView(loggingSpamFiltersButton);
+        settingsLayout.addView(gpuOffloadButton);
         settingsLayout.addView(resLayout);
         settingsLayout.addView(ignoreIpaCheckbox);
         settingsLayout.addView(onScreenDebugOverlayCheckbox);
@@ -574,6 +621,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         rootLayout.addView(settingsLayout);
         rootLayout.addView(loggingFiltersLayout);
         rootLayout.addView(loggingSpamFiltersLayout);
+        rootLayout.addView(gpuOffloadLayout);
         rootLayout.addView(bottomButtonsLayout, bottomParams);
 
         TextView versionTextView = new TextView(this) {
@@ -754,7 +802,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         } catch (Exception e) {}
     }
 
-    private void startGameThread(String workDir, String appDirPath, String bundleId, boolean logRender, boolean logSound, boolean logFs, boolean logNet, boolean logTodo, boolean logRenderDebug, boolean logFuncList, boolean logHiddenClasses, boolean logOther, int spamMask, boolean onScreenDebugOverlay, boolean showPerfOverlay, boolean nativeRootMmap, int targetW, int targetH, int esMode) {
+    private void startGameThread(String workDir, String appDirPath, String bundleId, boolean logRender, boolean logSound, boolean logFs, boolean logNet, boolean logTodo, boolean logRenderDebug, boolean logFuncList, boolean logHiddenClasses, boolean logOther, int spamMask, boolean onScreenDebugOverlay, boolean showPerfOverlay, boolean nativeRootMmap, int targetW, int targetH, int esMode, int gpuOffloadMask) {
         new Thread(() -> {
             if (nativeRootMmap) {
                 try {
@@ -773,7 +821,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
                     return;
                 }
             }
-            initWrapper(workDir, appDirPath, bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, spamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode);
+            initWrapper(workDir, appDirPath, bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, spamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode, gpuOffloadMask);
         }).start();
     }
 
@@ -860,7 +908,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
                                 String[] sfKeys = {"spam_log_render", "spam_log_sound", "spam_log_fs", "spam_log_net", "spam_log_todo", "spam_log_render_debug", "spam_log_func_list", "spam_log_hidden_classes", "spam_log_other"};
                                 for (int j = 0; j < 9; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean(sfKeys[j], true)) tempSpamMask |= (1 << j);
                                 final int finalSpamMask = tempSpamMask;
-                                startGameThread(WORK_DIR, finalAppDir.getAbsolutePath(), bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, finalSpamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode);
+                                int gpuMask = 0;
+                                for (int j = 0; j < 7; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + j, false)) gpuMask |= (1 << j);
+                                startGameThread(WORK_DIR, finalAppDir.getAbsolutePath(), bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, finalSpamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode, gpuMask);
                             });
                             return;
                         }
@@ -1265,7 +1315,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
                 String[] sfKeys = {"spam_log_render", "spam_log_sound", "spam_log_fs", "spam_log_net", "spam_log_todo", "spam_log_render_debug", "spam_log_func_list", "spam_log_hidden_classes", "spam_log_other"};
                 for (int j = 0; j < 9; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean(sfKeys[j], true)) tempSpamMask |= (1 << j);
                 final int finalSpamMask = tempSpamMask;
-                startGameThread(WORK_DIR, app.appDirPath, app.bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, finalSpamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode);
+                int gpuMask = 0;
+                for (int j = 0; j < 7; j++) if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("gpu_bit_" + j, false)) gpuMask |= (1 << j);
+                startGameThread(WORK_DIR, app.appDirPath, app.bundleId, logRender, logSound, logFs, logNet, logTodo, logRenderDebug, logFuncList, logHiddenClasses, logOther, finalSpamMask, onScreenDebugOverlay, showPerfOverlay, nativeRootMmap, targetW, targetH, esMode, gpuMask);
             });
             return layout;
         }

@@ -60,6 +60,7 @@ std::string GetNSString(void* nsstr);
 extern bool g_disableLogging;
 extern bool g_logRender, g_logSound, g_logFs, g_logNet, g_logTodo, g_logRenderDebug, g_logFuncList, g_logHiddenClasses, g_logOther;
 int g_spamFiltersMask = 0;
+int g_gpuOffloadMask = 0;
 void _LogToJava(const std::string& msg);
 #define LogToJava(msg) do { if (!g_disableLogging) _LogToJava(msg); } while(0)
 void _LogToBlackBox(const std::string& msg);
@@ -1421,10 +1422,17 @@ void ForceSafeGLState() {
 
 extern "C" void Stub_glClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
     g_cpuClearColor[0] = red; g_cpuClearColor[1] = green; g_cpuClearColor[2] = blue; g_cpuClearColor[3] = alpha;
-    glClearColor(red, green, blue, alpha);
+    if (g_gpuOffloadMask & 2) {
+        // ФИКС ПРОЗРАЧНОСТИ: Принудительно альфа = 1.0, чтобы сквозь игру не просвечивал рабочий стол телефона
+        glClearColor(red, green, blue, 1.0f);
+    }
 }
 
 extern "C" void MegaDebug_glClear(GLbitfield mask) {
+    // ФИКС ВЫЛЕТА (Signal 11 в драйвере): Очищаем мусорные биты расширений iOS (например 0x16640),
+    // от которых Android-драйвер крашится при аппаратном рендере
+    mask &= (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
     bool isSpamOn = (g_spamFiltersMask & (1 << 5)) != 0;
     static int clear_cnt = 0; clear_cnt++;
     if (!isSpamOn || clear_cnt <= 30 || clear_cnt % 120 == 0) {
@@ -1432,7 +1440,30 @@ extern "C" void MegaDebug_glClear(GLbitfield mask) {
         DumpGLState("BEFORE glClear");
     }
 
-    if (true) {
+    if (g_gpuOffloadMask & 2) {
+        SyncLog("[RENDER] Выполняем GPU очистку буфера...");
+        
+        static bool s_viewport_forced = false;
+        if (!s_viewport_forced) {
+            EGLint realW = g_surfaceWidth, realH = g_surfaceHeight;
+            EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
+            if (surf != EGL_NO_SURFACE) {
+                eglQuerySurface(eglGetCurrentDisplay(), surf, EGL_WIDTH, &realW);
+                eglQuerySurface(eglGetCurrentDisplay(), surf, EGL_HEIGHT, &realH);
+            }
+            glViewport(0, 0, realW, realH);
+            s_viewport_forced = true;
+        }
+
+        if (g_lastActiveFBO == 0 && (mask & GL_COLOR_BUFFER_BIT)) {
+            // ФИКС ПРОЗРАЧНОСТИ 2: Защищаем альфа-канал от затирания очисткой
+            glColorMask(g_colorMask[0], g_colorMask[1], g_colorMask[2], GL_FALSE);
+            glClear(mask);
+            glColorMask(g_colorMask[0], g_colorMask[1], g_colorMask[2], g_colorMask[3]);
+        } else {
+            glClear(mask);
+        }
+    } else {
         SyncLog("[RENDER] Выполняем очистку буфера...");
         std::vector<uint32_t>* targetColorBuf = &g_cpuColorBuffer;
         std::vector<float>* targetDepthBuf = &g_cpuDepthBuffer;
@@ -1482,6 +1513,29 @@ extern "C" EGLBoolean MegaDebug_eglSwapBuffers(EGLDisplay dpy, EGLSurface surfac
     if (!isSpamOn || swap_cnt <= 30 || swap_cnt % 120 == 0) {
         SyncLog("ENTER MegaDebug_eglSwapBuffers");
         DumpGLState("BEFORE eglSwapBuffers");
+    }
+
+    // ФИКС ЧЕРНОГО ЭКРАНА: Если GPU Draw (16) включен, а GPU Swap (1) выключен,
+    // кадр остался в видеопамяти! Нужно вытянуть его в CPU, чтобы оверлей и ANativeWindow отработали.
+    if ((g_gpuOffloadMask & 16) && !(g_gpuOffloadMask & 1)) {
+        std::vector<uint32_t> tempGpuBuf(g_surfaceWidth * g_surfaceHeight);
+        glReadPixels(0, 0, g_surfaceWidth, g_surfaceHeight, GL_RGBA, GL_UNSIGNED_BYTE, tempGpuBuf.data());
+        
+        // OpenGL читает снизу-вверх (перевернуто). Нужно отзеркалить по Y в g_cpuColorBuffer
+        for (int y = 0; y < g_surfaceHeight; y++) {
+            int invY = g_surfaceHeight - 1 - y;
+            uint32_t* dstRow = &g_cpuColorBuffer[invY * g_surfaceWidth];
+            uint32_t* srcRow = &tempGpuBuf[y * g_surfaceWidth];
+            
+            // Фикс формата: glReadPixels дает ABGR или RGBA, а нам нужен формат Android.
+            for (int x = 0; x < g_surfaceWidth; x++) {
+                uint32_t px = srcRow[x];
+                uint8_t r = px & 0xFF;
+                uint8_t g = (px >> 8) & 0xFF;
+                uint8_t b = (px >> 16) & 0xFF;
+                dstRow[x] = 0xFF000000 | (b << 16) | (g << 8) | r;
+            }
+        }
     }
 
     // --- ВИЗУАЛЬНАЯ ПРИБОРНАЯ ПАНЕЛЬ ОТЛАДКИ ---
@@ -1625,7 +1679,80 @@ extern "C" EGLBoolean MegaDebug_eglSwapBuffers(EGLDisplay dpy, EGLSurface surfac
     // -------------------------------------------
 
     EGLBoolean res = EGL_TRUE;
-    if (g_nativeWindow) {
+    if (g_gpuOffloadMask & 1) {
+        // --- GPU ОВЕРЛЕИ ---
+        if (g_onScreenDebugOverlay || g_showPerfOverlay) {
+            static GLuint overlayTex = 0;
+            static GLuint overlayProg = 0;
+            if (overlayTex == 0) {
+                glGenTextures(1, &overlayTex);
+                glBindTexture(GL_TEXTURE_2D, overlayTex);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                
+                const char* vs = "attribute vec4 pos; attribute vec2 uv; varying vec2 v_uv; void main() { gl_Position = pos; v_uv = uv; }";
+                const char* fs = "precision mediump float; varying vec2 v_uv; uniform sampler2D tex; void main() { gl_FragColor = texture2D(tex, v_uv); }";
+                GLuint vsh = glCreateShader(GL_VERTEX_SHADER); glShaderSource(vsh, 1, &vs, nullptr); glCompileShader(vsh);
+                GLuint fsh = glCreateShader(GL_FRAGMENT_SHADER); glShaderSource(fsh, 1, &fs, nullptr); glCompileShader(fsh);
+                overlayProg = glCreateProgram(); glAttachShader(overlayProg, vsh); glAttachShader(overlayProg, fsh);
+                glBindAttribLocation(overlayProg, 0, "pos"); glBindAttribLocation(overlayProg, 1, "uv");
+                glLinkProgram(overlayProg);
+            }
+            
+            GLint oldProg; glGetIntegerv(GL_CURRENT_PROGRAM, &oldProg);
+            GLint oldTex; glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTex);
+            GLint oldActiveTex; glGetIntegerv(GL_ACTIVE_TEXTURE, &oldActiveTex);
+            GLint oldArrayBuf; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &oldArrayBuf);
+            GLboolean blendEnabled = glIsEnabled(GL_BLEND);
+            GLboolean depthTest = glIsEnabled(GL_DEPTH_TEST);
+            GLboolean cullFace = glIsEnabled(GL_CULL_FACE);
+            
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            
+            glUseProgram(overlayProg);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, overlayTex);
+            
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_surfaceWidth, g_surfaceHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_cpuColorBuffer.data());
+            glUniform1i(glGetUniformLocation(overlayProg, "tex"), 0);
+            
+            float verts[] = {
+                // ФИКС ПЕРЕВОРОТА: Меняем V координаты местами (1.0 -> 0.0, 0.0 -> 1.0)
+                // Так как glTexImage2D читает снизу-вверх, а наш CPU-буфер идет сверху-вниз.
+                -1.0f,  1.0f, 0.0f, 0.0f, // top left (V=0)
+                -1.0f, -1.0f, 0.0f, 1.0f, // bottom left (V=1)
+                 1.0f,  1.0f, 1.0f, 0.0f, // top right (V=0)
+                 1.0f, -1.0f, 1.0f, 1.0f  // bottom right (V=1)
+            };
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glEnableVertexAttribArray(0);
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, verts);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, verts + 2);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glDisableVertexAttribArray(0);
+            glDisableVertexAttribArray(1);
+            
+            glUseProgram(oldProg);
+            glActiveTexture(oldActiveTex);
+            glBindTexture(GL_TEXTURE_2D, oldTex);
+            glBindBuffer(GL_ARRAY_BUFFER, oldArrayBuf);
+            if (!blendEnabled) glDisable(GL_BLEND);
+            if (depthTest) glEnable(GL_DEPTH_TEST);
+            if (cullFace) glEnable(GL_CULL_FACE);
+        }
+        
+        // Очищаем буфер прозрачным цветом, чтобы в следующем кадре оверлеи рисовались на чистом фоне
+        std::fill(g_cpuColorBuffer.begin(), g_cpuColorBuffer.end(), 0x00000000);
+
+        SyncLog("[RENDER] Отправка буфера на экран (GPU eglSwapBuffers)...");
+        res = eglSwapBuffers(g_eglDisplay, g_eglSurface);
+    } else if (g_nativeWindow) {
         SyncLog("[RENDER] Отправка буфера на экран (ANativeWindow)...");
         ANativeWindow_Buffer buffer;
         if (ANativeWindow_lock(g_nativeWindow, &buffer, nullptr) == 0) {
@@ -1657,12 +1784,29 @@ extern "C" EGLBoolean MegaDebug_eglSwapBuffers(EGLDisplay dpy, EGLSurface surfac
 // ==========================================
 extern "C" void Stub_glBindFramebuffer(GLenum target, GLuint framebuffer) { 
     g_lastActiveFBO = framebuffer;
-    if (framebuffer == 1) glBindFramebuffer(target, 0); else glBindFramebuffer(target, framebuffer); 
+    if (g_gpuOffloadMask & 64) {
+        if (framebuffer == 1) glBindFramebuffer(target, 0); else glBindFramebuffer(target, framebuffer); 
+    }
 }
-extern "C" void Stub_glBindRenderbuffer(GLenum target, GLuint renderbuffer) { if (renderbuffer == 1 || renderbuffer == 2) glBindRenderbuffer(target, 0); else glBindRenderbuffer(target, renderbuffer); }
-extern "C" void Stub_glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) { if (renderbuffer == 1 || renderbuffer == 2) return; glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer); }
-extern "C" void Stub_glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) { GLint bound_rbo = 0; glGetIntegerv(GL_RENDERBUFFER_BINDING, &bound_rbo); if (bound_rbo == 0) return; glRenderbufferStorage(target, internalformat, width, height); }
-extern "C" GLenum Stub_glCheckFramebufferStatus(GLenum target) { GLint bound_fbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound_fbo); if (bound_fbo == 0) return GL_FRAMEBUFFER_COMPLETE; return glCheckFramebufferStatus(target); }
+extern "C" void Stub_glBindRenderbuffer(GLenum target, GLuint renderbuffer) { 
+    if (g_gpuOffloadMask & 64) {
+        if (renderbuffer == 1 || renderbuffer == 2) glBindRenderbuffer(target, 0); else glBindRenderbuffer(target, renderbuffer); 
+    }
+}
+extern "C" void Stub_glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) { 
+    if (g_gpuOffloadMask & 64) {
+        if (renderbuffer == 1 || renderbuffer == 2) return; glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer); 
+    }
+}
+extern "C" void Stub_glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) { 
+    GLint bound_rbo = 0; glGetIntegerv(GL_RENDERBUFFER_BINDING, &bound_rbo); if (bound_rbo == 0) return; 
+    if (g_gpuOffloadMask & 64) glRenderbufferStorage(target, internalformat, width, height); 
+}
+extern "C" GLenum Stub_glCheckFramebufferStatus(GLenum target) { 
+    GLint bound_fbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound_fbo); if (bound_fbo == 0) return GL_FRAMEBUFFER_COMPLETE; 
+    if (g_gpuOffloadMask & 64) return glCheckFramebufferStatus(target);
+    return GL_FRAMEBUFFER_COMPLETE;
+}
 extern "C" void Stub_glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) { 
     uint32_t lr = (uint32_t)__builtin_return_address(0);
     if (pname == 0x8D42) { 
@@ -1693,7 +1837,7 @@ extern "C" void Stub_glFramebufferTexture2D(GLenum target, GLenum attachment, GL
     if (texture != 0) {
         g_fboTextures[texture] = true;
     }
-    glFramebufferTexture2D(target, attachment, textarget, texture, level);
+    if (g_gpuOffloadMask & 64) glFramebufferTexture2D(target, attachment, textarget, texture, level);
 }
 
 extern "C" void Stub_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) { 
@@ -1707,11 +1851,19 @@ extern "C" void Stub_glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
     }
     g_gameViewportW = width; 
     g_gameViewportH = height;
-    if ((width <= g_surfaceWidth && height <= g_surfaceHeight) || (width <= g_surfaceHeight && height <= g_surfaceWidth)) {
-        glViewport(0, 0, g_surfaceWidth, g_surfaceHeight); 
-    } else {
-        glViewport(x, y, width, height); 
-    } 
+    if (g_gpuOffloadMask & 64) {
+        if (g_lastActiveFBO == 0 || g_lastActiveFBO == 1) {
+            EGLint realW = g_surfaceWidth, realH = g_surfaceHeight;
+            EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
+            if (surf != EGL_NO_SURFACE) {
+                eglQuerySurface(eglGetCurrentDisplay(), surf, EGL_WIDTH, &realW);
+                eglQuerySurface(eglGetCurrentDisplay(), surf, EGL_HEIGHT, &realH);
+            }
+            glViewport(0, 0, realW, realH); 
+        } else {
+            glViewport(x, y, width, height); 
+        } 
+    }
 }
 
 std::map<GLenum, GLuint> g_boundBuffers;
@@ -1781,19 +1933,22 @@ extern "C" void Stub_glVertexAttribPointer(GLuint index, GLint size, GLenum type
         g_vertexAttribs[index].pointer = pointer;
         g_vertexAttribs[index].vbo = g_boundBuffers[0x8892]; // Запоминаем текущий GL_ARRAY_BUFFER
     }
+    if (g_gpuOffloadMask & 16) glVertexAttribPointer(index, size, type, normalized, stride, pointer);
 }
 
 extern "C" void Stub_glEnableVertexAttribArray(GLuint index) {
     if (index < 16) g_vertexAttribs[index].enabled = 1;
+    if (g_gpuOffloadMask & 16) glEnableVertexAttribArray(index);
 }
 
 extern "C" void Stub_glDisableVertexAttribArray(GLuint index) {
     if (index < 16) g_vertexAttribs[index].enabled = 0;
+    if (g_gpuOffloadMask & 16) glDisableVertexAttribArray(index);
 }
 
 extern "C" void Stub_glBindBuffer(GLenum target, GLuint buffer) {
     g_boundBuffers[target] = buffer;
-    // БОЛЬШЕ НЕ ПРОБРАСЫВАЕМ В РЕАЛЬНЫЙ ДРАЙВЕР
+    if (g_gpuOffloadMask & 16) glBindBuffer(target, buffer);
 }
 
 extern "C" void Stub_glBufferData(GLenum target, GLsizeiptr size, const GLvoid* data, GLenum usage) {
@@ -1802,7 +1957,7 @@ extern "C" void Stub_glBufferData(GLenum target, GLsizeiptr size, const GLvoid* 
         g_vboShadow[buffer].resize(size);
         if (data) memcpy(g_vboShadow[buffer].data(), data, size);
     }
-    // БОЛЬШЕ НЕ ПРОБРАСЫВАЕМ В РЕАЛЬНЫЙ ДРАЙВЕР
+    if (g_gpuOffloadMask & 16) glBufferData(target, size, data, usage);
 }
 
 extern "C" void Stub_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid* data) {
@@ -1812,12 +1967,12 @@ extern "C" void Stub_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr 
         if (offset + size > buf.size()) buf.resize(offset + size);
         memcpy(buf.data() + offset, data, size);
     }
-    // БОЛЬШЕ НЕ ПРОБРАСЫВАЕМ В РЕАЛЬНЫЙ ДРАЙВЕР
+    if (g_gpuOffloadMask & 16) glBufferSubData(target, offset, size, data);
 }
 
 extern "C" void Stub_glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     for (int i = 0; i < n; i++) g_vboShadow.erase(buffers[i]);
-    // БОЛЬШЕ НЕ ПРОБРАСЫВАЕМ В РЕАЛЬНЫЙ ДРАЙВЕР
+    if (g_gpuOffloadMask & 16) glDeleteBuffers(n, buffers);
 }
 
 extern "C" void Stub_glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) {
@@ -1907,6 +2062,19 @@ extern "C" void Stub_glShaderSource(GLuint shader, GLsizei count, const GLchar *
             }
         }
     }
+
+    if (patched.find("gl_Position") != std::string::npos) {
+        std::string wrapper = "uniform float u_damn_rot;\n#define main damn_main\n";
+        size_t verPos = patched.find("#version");
+        if (verPos != std::string::npos) {
+            size_t nl = patched.find('\n', verPos);
+            if (nl != std::string::npos) patched.insert(nl + 1, wrapper);
+            else patched = wrapper + patched;
+        } else {
+            patched = wrapper + patched;
+        }
+        patched += "\n#undef main\nvoid main() {\n  damn_main();\n  if (u_damn_rot > 0.5) gl_Position.xy = vec2(-gl_Position.y, gl_Position.x);\n}\n";
+    }
     
     LogToJava("[SHADER-DUMP] Compiling Shader ID " + std::to_string(shader) + "\n=== CODE ===\n" + patched + "\n============");
 
@@ -1949,7 +2117,7 @@ static inline size_t SafeGetGLTextureSize(GLsizei width, GLsizei height, GLenum 
 
 extern "C" void Stub_glBindTexture(GLenum target, GLuint texture) {
     if (target == GL_TEXTURE_2D) g_cpuActiveTexture = texture;
-    glBindTexture(target, texture);
+    if (g_gpuOffloadMask & 8) glBindTexture(target, texture);
 }
 
 extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -2120,8 +2288,7 @@ extern "C" void Stub_glTexImage2D(GLenum target, GLint level, GLint internalform
             safe_pixels = converted_buf.data();
         }
     }
-
-    glTexImage2D(target, level, hw_internalformat, width, height, border, hw_format, type, safe_pixels);
+    if (g_gpuOffloadMask & 8) glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
 }
 
 extern "C" void Stub_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -2209,35 +2376,12 @@ extern "C" void Stub_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, 
             }
         }
     }
-    
-    // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
-    const GLvoid* safe_pixels = pixels;
-    std::vector<uint8_t> aligned_buf;
-    if (pixels != nullptr && ((uintptr_t)pixels % 16 != 0)) {
-        size_t totalBytes = SafeGetGLTextureSize(width, height, format, type);
-        if (totalBytes > 0) {
-            aligned_buf.resize(totalBytes);
-            memcpy(aligned_buf.data(), pixels, totalBytes);
-            safe_pixels = aligned_buf.data();
-        }
-    }
-
-    glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, safe_pixels);
+    if (g_gpuOffloadMask & 8) glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
 }
 
 extern "C" void Stub_glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const GLvoid *data) {
     LogToJava("[GL-TEX] glCompressedTexSubImage2D called!");
-    
-    // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
-    const GLvoid* safe_data = data;
-    std::vector<uint8_t> aligned_buf;
-    if (data != nullptr && imageSize > 0 && ((uintptr_t)data % 8 != 0)) {
-        aligned_buf.resize(imageSize);
-        memcpy(aligned_buf.data(), data, imageSize);
-        safe_data = aligned_buf.data();
-    }
-    
-    glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, safe_data);
+    if (g_gpuOffloadMask & 8) glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
 }
 
 extern "C" void Stub_glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data) {
@@ -2257,17 +2401,7 @@ extern "C" void Stub_glCompressedTexImage2D(GLenum target, GLint level, GLenum i
         }
         LogToJava("HLE_WARNING: Stub_glCompressedTexImage2D PVRTC перехвачен! Заменено на шахматку.");
     }
-    
-    // --- БЕЗОПАСНАЯ ОТПРАВКА В ЖЕЛЕЗО (ИСПРАВЛЕНИЕ КРАША MTK) ---
-    const GLvoid* safe_data = data;
-    std::vector<uint8_t> aligned_buf;
-    if (data != nullptr && imageSize > 0 && ((uintptr_t)data % 8 != 0)) {
-        aligned_buf.resize(imageSize);
-        memcpy(aligned_buf.data(), data, imageSize);
-        safe_data = aligned_buf.data();
-    }
-    
-    glCompressedTexImage2D(target, level, internalformat, width, height, border, imageSize, safe_data);
+    if (g_gpuOffloadMask & 8) glCompressedTexImage2D(target, level, internalformat, width, height, border, imageSize, data);
 }
 
 std::map<GLint, std::vector<float>> g_uniformShadowFloat;
@@ -3182,12 +3316,50 @@ void CPUExtractAndDraw(GLenum drawMode, GLint first, GLsizei count, const GLvoid
 extern "C" void MegaDebug_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     SyncLog("[GL-TRACE] glDrawArrays(mode=" + std::to_string(mode) + ", first=" + std::to_string(first) + ", count=" + std::to_string(count) + ")");
     g_frameHasDraw = true;
-    CPUExtractAndDraw(mode, first, count, nullptr, 0);
+    if (g_gpuOffloadMask & 16) {
+        int targetW = g_surfaceWidth;
+        int targetH = g_surfaceHeight;
+        if (g_lastActiveFBO != 0 && g_fboColorTex.count(g_lastActiveFBO)) {
+            GLuint tex = g_fboColorTex[g_lastActiveFBO];
+            if (tex != 0 && g_cpuTexW.count(tex) && g_cpuTexW[tex] > 0) {
+                targetW = g_cpuTexW[tex];
+                targetH = g_cpuTexH[tex];
+            }
+        }
+        bool needRot = (g_gameViewportH > g_gameViewportW && targetW > targetH);
+        GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+        if (prog > 0) {
+            GLint rotLoc = glGetUniformLocation(prog, "u_damn_rot");
+            if (rotLoc != -1) glUniform1f(rotLoc, needRot ? 1.0f : 0.0f);
+        }
+        glDrawArrays(mode, first, count);
+    } else {
+        CPUExtractAndDraw(mode, first, count, nullptr, 0);
+    }
 }
 extern "C" void MegaDebug_glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
     SyncLog("[GL-TRACE] glDrawElements(mode=" + std::to_string(mode) + ", count=" + std::to_string(count) + ", type=" + std::to_string(type) + ")");
     g_frameHasDraw = true;
-    CPUExtractAndDraw(mode, 0, count, indices, type);
+    if (g_gpuOffloadMask & 16) {
+        int targetW = g_surfaceWidth;
+        int targetH = g_surfaceHeight;
+        if (g_lastActiveFBO != 0 && g_fboColorTex.count(g_lastActiveFBO)) {
+            GLuint tex = g_fboColorTex[g_lastActiveFBO];
+            if (tex != 0 && g_cpuTexW.count(tex) && g_cpuTexW[tex] > 0) {
+                targetW = g_cpuTexW[tex];
+                targetH = g_cpuTexH[tex];
+            }
+        }
+        bool needRot = (g_gameViewportH > g_gameViewportW && targetW > targetH);
+        GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+        if (prog > 0) {
+            GLint rotLoc = glGetUniformLocation(prog, "u_damn_rot");
+            if (rotLoc != -1) glUniform1f(rotLoc, needRot ? 1.0f : 0.0f);
+        }
+        glDrawElements(mode, count, type, indices);
+    } else {
+        CPUExtractAndDraw(mode, 0, count, indices, type);
+    }
 }
 extern "C" void MegaDebug_glUseProgram(GLuint program) {
     SyncLog("[GL-TRACE] glUseProgram(prog=" + std::to_string(program) + ")");
@@ -3199,7 +3371,7 @@ extern "C" void MegaDebug_glEnable(GLenum cap) {
     else if (cap == GL_TEXTURE_2D) g_texture2DEnabled = true;
     else if (cap == 0x0B44) g_cullFaceEnabled = true; // GL_CULL_FACE
     else if (cap == 0x8840) g_matrixPaletteEnabled = true; // GL_MATRIX_PALETTE_OES
-    glEnable(cap);
+    if (g_gpuOffloadMask & 32) glEnable(cap);
 }
 extern "C" void MegaDebug_glDisable(GLenum cap) {
     if (cap == GL_BLEND) g_blendEnabled = false;
@@ -3207,30 +3379,30 @@ extern "C" void MegaDebug_glDisable(GLenum cap) {
     else if (cap == GL_TEXTURE_2D) g_texture2DEnabled = false;
     else if (cap == 0x0B44) g_cullFaceEnabled = false;
     else if (cap == 0x8840) g_matrixPaletteEnabled = false;
-    glDisable(cap);
+    if (g_gpuOffloadMask & 32) glDisable(cap);
 }
-extern "C" void MegaDebug_glCullFace(GLenum mode) { g_cullFaceMode = mode; glCullFace(mode); }
-extern "C" void MegaDebug_glFrontFace(GLenum mode) { g_frontFace = mode; glFrontFace(mode); }
+extern "C" void MegaDebug_glCullFace(GLenum mode) { g_cullFaceMode = mode; if (g_gpuOffloadMask & 32) glCullFace(mode); }
+extern "C" void MegaDebug_glFrontFace(GLenum mode) { g_frontFace = mode; if (g_gpuOffloadMask & 32) glFrontFace(mode); }
 extern "C" void MegaDebug_glBlendFunc(GLenum sfactor, GLenum dfactor) {
     g_blendSrc = sfactor; g_blendDst = dfactor;
-    glBlendFunc(sfactor, dfactor);
+    if (g_gpuOffloadMask & 32) glBlendFunc(sfactor, dfactor);
 }
 extern "C" void MegaDebug_glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
     g_blendSrc = srcRGB; g_blendDst = dstRGB;
-    glBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
+    if (g_gpuOffloadMask & 32) glBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
 }
 extern "C" void MegaDebug_glDepthMask(GLboolean flag) {
     g_depthMask = (flag != GL_FALSE);
-    glDepthMask(flag);
+    if (g_gpuOffloadMask & 32) glDepthMask(flag);
 }
 extern "C" void MegaDebug_glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
     g_colorMask[0] = (r != GL_FALSE); g_colorMask[1] = (g != GL_FALSE);
     g_colorMask[2] = (b != GL_FALSE); g_colorMask[3] = (a != GL_FALSE);
-    glColorMask(r, g, b, a);
+    if (g_gpuOffloadMask & 32) glColorMask(r, g, b, a);
 }
 extern "C" void MegaDebug_glDepthFunc(GLenum func) {
     g_depthFunc = func;
-    glDepthFunc(func);
+    if (g_gpuOffloadMask & 32) glDepthFunc(func);
 }
 extern "C" const GLubyte* MegaDebug_glGetString(GLenum name) {
     if (name == GL_VERSION) {
@@ -5852,8 +6024,8 @@ uint64_t Impl_objc_msgSend(void* self, const char* op, void* a1, void* a2, void*
             float rx = t->x, ry = t->y;
             
             if (g_gameViewportH > g_gameViewportW && g_surfaceWidth > g_surfaceHeight) {
-                rx = (((float)g_surfaceHeight - t->y) / (float)g_surfaceHeight) * (float)g_surfaceWidth;
-                ry = (t->x / (float)g_surfaceWidth) * (float)g_surfaceHeight;
+                rx = (float)g_surfaceHeight - t->y;
+                ry = t->x;
             }
             
             // Если запрашивают координаты относительно конкретного View, а не окна (a1 != nil)
@@ -5891,8 +6063,8 @@ uint64_t Impl_objc_msgSend(void* self, const char* op, void* a1, void* a2, void*
             FakeUITouch* t = (FakeUITouch*)self; 
             float rx = t->x, ry = t->y;
             if (g_gameViewportH > g_gameViewportW && g_surfaceWidth > g_surfaceHeight) {
-                rx = (((float)g_surfaceHeight - t->y) / (float)g_surfaceHeight) * (float)g_surfaceWidth;
-                ry = (t->x / (float)g_surfaceWidth) * (float)g_surfaceHeight;
+                rx = (float)g_surfaceHeight - t->y;
+                ry = t->x;
             }
             uint32_t bx, by; memcpy(&bx, &rx, 4); memcpy(&by, &ry, 4); return ((uint64_t)by << 32) | bx;
         }
@@ -6236,8 +6408,8 @@ void* Impl_objc_msgSend_stret(void* ret_addr, void* self, const char* op, void* 
             FakeUITouch* t = (FakeUITouch*)self;
             float rx = t->x, ry = t->y;
             if (g_gameViewportH > g_gameViewportW && g_surfaceWidth > g_surfaceHeight) {
-                rx = (((float)g_surfaceHeight - t->y) / (float)g_surfaceHeight) * (float)g_surfaceWidth;
-                ry = (t->x / (float)g_surfaceWidth) * (float)g_surfaceHeight;
+                rx = (float)g_surfaceHeight - t->y;
+                ry = t->x;
             }
             float* pt = (float*)ret_addr;
             pt[0] = rx;
@@ -6361,8 +6533,8 @@ void* Impl_objc_msgSendSuper2_stret(void* ret_addr, void* super_struct, const ch
             FakeUITouch* t = (FakeUITouch*)receiver;
             float rx = t->x, ry = t->y;
             if (g_gameViewportH > g_gameViewportW && g_surfaceWidth > g_surfaceHeight) {
-                rx = (((float)g_surfaceHeight - t->y) / (float)g_surfaceHeight) * (float)g_surfaceWidth;
-                ry = (t->x / (float)g_surfaceWidth) * (float)g_surfaceHeight;
+                rx = (float)g_surfaceHeight - t->y;
+                ry = t->x;
             }
             float* pt = (float*)ret_addr;
             pt[0] = rx;
@@ -12359,8 +12531,9 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     return JNI_VERSION_1_6;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_damnwrapper32armv7_xaview_MainActivity_initWrapper(JNIEnv *env, jobject thiz, jstring workDir, jstring appBundle, jstring bundleId, jboolean logRender, jboolean logSound, jboolean logFs, jboolean logNet, jboolean logTodo, jboolean logRenderDebug, jboolean logFuncList, jboolean logHiddenClasses, jboolean logOther, jint spamFiltersMask, jboolean onScreenDebugOverlay, jboolean showPerfOverlay, jboolean nativeRootMmap, jint resWidth, jint resHeight, jint esMode) {
+extern "C" JNIEXPORT void JNICALL Java_com_damnwrapper32armv7_xaview_MainActivity_initWrapper(JNIEnv *env, jobject thiz, jstring workDir, jstring appBundle, jstring bundleId, jboolean logRender, jboolean logSound, jboolean logFs, jboolean logNet, jboolean logTodo, jboolean logRenderDebug, jboolean logFuncList, jboolean logHiddenClasses, jboolean logOther, jint spamFiltersMask, jboolean onScreenDebugOverlay, jboolean showPerfOverlay, jboolean nativeRootMmap, jint resWidth, jint resHeight, jint esMode, jint gpuOffloadMask) {
     g_mainActivity = env->NewGlobalRef(thiz); 
+    g_gpuOffloadMask = gpuOffloadMask;
     g_surfaceWidth = resWidth;
     g_surfaceHeight = resHeight;
     g_logRender = logRender;
@@ -12441,11 +12614,24 @@ extern "C" JNIEXPORT void JNICALL Java_com_damnwrapper32armv7_xaview_MainActivit
     g_cpuColorBuffer.resize(g_surfaceWidth * g_surfaceHeight, 0xFF000000);
     
     g_eglDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY); eglInitialize(g_eglDisplay, 0, 0);
-    const EGLint attribs[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_NONE };
+    // ФИКС КРАША 0x8: Обязательно добавляем EGL_WINDOW_BIT, иначе драйвер упадет при eglSwapBuffers
+    // ФИКС КРАША GL_STENCIL_BUFFER_BIT: Добавляем EGL_STENCIL_SIZE и EGL_ALPHA_SIZE для Adreno
+    const EGLint attribs[] = { 
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, 
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT, 
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, 
+        EGL_DEPTH_SIZE, 16, EGL_STENCIL_SIZE, 8, 
+        EGL_NONE 
+    };
     EGLConfig config; EGLint numConfigs; eglChooseConfig(g_eglDisplay, attribs, &config, 1, &numConfigs);
     const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE }; g_eglContext = eglCreateContext(g_eglDisplay, config, EGL_NO_CONTEXT, contextAttribs);
-    const EGLint pbufferAttribs[] = { EGL_WIDTH, 64, EGL_HEIGHT, 64, EGL_NONE };
-    g_eglSurface = eglCreatePbufferSurface(g_eglDisplay, config, pbufferAttribs);
+    if (g_gpuOffloadMask & 1) {
+        g_eglSurface = eglCreateWindowSurface(g_eglDisplay, config, g_nativeWindow, nullptr);
+    } else {
+        // ФИКС СПЛЮСНУТОГО ЭКРАНА: Создаем PBuffer в размер экрана игры, а не 64x64
+        const EGLint pbufferAttribs[] = { EGL_WIDTH, g_surfaceWidth, EGL_HEIGHT, g_surfaceHeight, EGL_NONE };
+        g_eglSurface = eglCreatePbufferSurface(g_eglDisplay, config, pbufferAttribs);
+    }
     
     eglMakeCurrent(g_eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     LogToJava("onSurfaceCreated: EGL контекст отвязан от главного потока, создаем execThread...");
@@ -12539,23 +12725,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_damnwrapper32armv7_xaview_MainActivit
     if (!g_hleClasses.count("FakeUITouch")) g_hleClasses["FakeUITouch"] = new HLEClass{0xDEADBEEF, "FakeUITouch"};
     if (!g_hleClasses.count("FakeNSSet")) g_hleClasses["FakeNSSet"] = new HLEClass{0xDEADBEEF, "FakeNSSet"};
 
-    // КРИТИЧНО: Масштабируем координаты из Android-пикселей в логику iPhone (480x320)
-    // Мы предполагаем, что Java передает координаты относительно View
+    // Координаты уже отмасштабированы в Java, используем их напрямую
     float scaledX = x;
     float scaledY = y;
-    
-    // Попытка угадать масштаб, если x/y явно больше размеров буфера
-    if (g_surfaceWidth > 0 && g_surfaceHeight > 0) {
-        // Если координаты пришли в пикселях 1080p+, а буфер 480, нам нужно знать размер Android View.
-        // Пока используем простую проверку: если x > g_surfaceWidth, значит это сырые пиксели.
-        // В идеале эти коэффициенты должна передавать Java, но сделаем авто-фикс:
-        static float lastKnownWidth = 0;
-        if (x > g_surfaceWidth && lastKnownWidth == 0) lastKnownWidth = x * 1.1f; // Грубая оценка
-        if (lastKnownWidth > g_surfaceWidth) {
-            scaledX = (x / lastKnownWidth) * g_surfaceWidth;
-            scaledY = (y / (lastKnownWidth * 0.66f)) * g_surfaceHeight;
-        }
-    }
 
     // Принудительный поворот осей тачскрина убран. 
     // Визуал мы уже выровняли в CPUExtractAndDraw, а UIWindow игры (в SMB2)
