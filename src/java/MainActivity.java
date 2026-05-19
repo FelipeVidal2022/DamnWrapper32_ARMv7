@@ -324,7 +324,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         commandsText.setGravity(Gravity.CENTER);
         commandsText.setTextIsSelectable(true);
         commandsText.setPadding(40, 40, 40, 40);
-        commandsText.setText("-launch packagename_version\n*Example: -launch com.sega.smb2_2.0.0\n#Skips wrapper menus and launch app directly.");
+        commandsText.setText("-launch packagename_version\n*Example: -launch com.sega.smb2_2.0.0\n#Skips wrapper menus and launch app directly.\n\n-novideo\n#Skips videos in all games");
 
         android.widget.Button commandsBackButton = new android.widget.Button(this);
         commandsBackButton.setText("Back");
@@ -862,11 +862,41 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
             File optionsFile = new File(WORK_DIR + "damn32_options.txt");
             if (optionsFile.exists()) {
                 java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(optionsFile));
-                String line = reader.readLine();
+                String line;
+                boolean hasError = false;
+                String targetApp = null;
+                boolean noVideo = false;
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+                    
+                    int firstSpace = line.indexOf(' ');
+                    if (firstSpace != -1) {
+                        String rest = line.substring(firstSpace + 1).trim();
+                        if (rest.contains(" -") || rest.startsWith("-")) {
+                            hasError = true;
+                            break;
+                        }
+                    } else if (line.contains(" -")) {
+                        hasError = true;
+                        break;
+                    }
+                    
+                    if (line.startsWith("-launch ")) {
+                        targetApp = line.substring(8).trim();
+                    } else if (line.startsWith("-novideo")) {
+                        noVideo = true;
+                    }
+                }
                 reader.close();
-                if (line != null && line.startsWith("-launch ")) {
-                    String targetApp = line.substring(8).trim();
-                    File targetDir = new File(APPS_INSTALLED_DIR, targetApp);
+
+                if (hasError) {
+                    final String failMsg = "Command error: multiple commands on one line are not allowed";
+                    runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this, failMsg, android.widget.Toast.LENGTH_LONG).show());
+                } else {
+                    getSharedPreferences("DamnPrefs", MODE_PRIVATE).edit().putBoolean("novideo_cmd", noVideo).apply();
+                    if (targetApp != null) {
+                        File targetDir = new File(APPS_INSTALLED_DIR, targetApp);
                     if (targetDir.exists() && targetDir.isDirectory()) {
                         File payload = new File(targetDir, "Payload");
                         File appDirToLaunch = null;
@@ -915,8 +945,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
                             return;
                         }
                     }
-                    final String failMsg = "Command error: no app " + targetApp + " founded";
-                    runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this, failMsg, android.widget.Toast.LENGTH_LONG).show());
+                        final String failMsg = "Command error: no app " + targetApp + " founded";
+                        runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this, failMsg, android.widget.Toast.LENGTH_LONG).show());
+                    }
                 }
             }
         } catch (Exception e) {}
@@ -1804,6 +1835,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
     public void videoInit(int ptrId, String path) {
         runOnUiThread(() -> {
             activeVideoPtrId = ptrId;
+            if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("novideo_cmd", false)) {
+                addLogFromNative("HLE Video: Инициализация " + path + " пропущена (-novideo)");
+                return;
+            }
             videoView.setVideoPath(path);
             addLogFromNative("HLE Video: Успешно инициализирован " + path);
         });
@@ -1812,6 +1847,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
     public void videoPlay(int ptrId) {
         runOnUiThread(() -> {
             activeVideoPtrId = ptrId;
+            if (getSharedPreferences("DamnPrefs", MODE_PRIVATE).getBoolean("novideo_cmd", false)) {
+                new Thread(() -> {
+                    addLogFromNative("Java Thread: Пропуск видео (команда -novideo)...");
+                    onVideoFinishedNative(ptrId);
+                }).start();
+                return;
+            }
             videoView.setVisibility(View.VISIBLE); // ФИКС: Явно возвращаем Surface
             videoContainer.setVisibility(View.VISIBLE);
             skipButton.setVisibility(View.GONE);
