@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-	android:versionName="1.0.3"
+	android:versionName="1.0.4"
 	android:versionCode="4"
-    package="com.damnwrapper32armv7.xaview">
+    package="com.damnwrapper32armv7.felipevidal2022">
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
@@ -12,7 +12,7 @@
     <uses-permission android:name="android.permission.DUMP" />
 
     <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="true"
-        android:label="DamnWrapper32 (ARMv7)"
+        android:label="DamnWrapper32 (FV2022)"
         android:requestLegacyExternalStorage="true">
         <activity android:name=".MainActivity"
             android:exported="true"
