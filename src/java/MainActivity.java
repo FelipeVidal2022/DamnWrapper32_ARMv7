@@ -638,9 +638,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Se
         };
         try {
             android.content.pm.PackageInfo pInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
-            versionTextView.setText("DamnWrapper32 (ARMv7) v" + pInfo.versionName);
+            versionTextView.setText("DamnWrapper32 (FV2022) v" + pInfo.versionName);
         } catch (Exception e) {
-            versionTextView.setText("DamnWrapper32 (ARMv7)");
+            versionTextView.setText("DamnWrapper32 (FV2022)");
         }
         versionTextView.setTextSize(14f);
         versionTextView.setTypeface(Typeface.DEFAULT_BOLD);
